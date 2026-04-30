@@ -43,20 +43,57 @@ upstream image  ──►  overlay (apt-get upgrade, optional pip pins)  ──�
 │   ├── Dockerfile.openhands     # FROM ${BASE_IMAGE}; apt upgrade; optional pip
 │   └── Dockerfile.agent-server  # same shape, for sandbox runtime image
 └── scripts/
-    ├── lib.sh                   # shared helpers
-    ├── build.sh                 # pull → scan → overlay → scan → policy gate
-    ├── verify.sh                # scan-only mode
-    └── update.sh                # find newer upstream tags, optionally rebuild
+    ├── lib.sh / lib.ps1         # shared helpers (bash / PowerShell)
+    ├── build.sh / build.ps1     # scan → overlay → scan → policy gate
+    ├── verify.sh / verify.ps1   # scan-only mode + --check-pin
+    └── update.sh / update.ps1   # find newer SDK release, optionally rebuild
 ```
+
+The **bash** scripts (`*.sh`) and **PowerShell** scripts (`*.ps1`) are
+behaviourally equivalent ports of one another; same flags, same exit
+codes, same reports. Pick whichever your shell prefers.
 
 ## Prerequisites
 
 - Docker Desktop (or Docker Engine ≥ 24.x) with **Docker Scout** available
   (`docker scout version`).
-- macOS, Linux, or WSL2.
+- One of:
+  - **macOS** — bash scripts work as-is.
+  - **Linux** (incl. **WSL2 Ubuntu**) — bash scripts work as-is.
+  - **Windows** — either run the bash scripts inside WSL2 (recommended,
+    same code path as Linux) **or** run the native PowerShell scripts
+    (`build.ps1`, `verify.ps1`, `update.ps1`) under PowerShell 7+.
 - **Both upstream images already present in your local Docker cache.** This
   repo does not pull or build the upstream images — that is the operator's
   job. See "Obtaining the upstream images" below.
+
+### Platform notes
+
+**macOS.** Tested with Docker Desktop on Apple Silicon. No extra setup.
+
+**Linux / WSL2 Ubuntu.** Install Docker Engine + the scout plugin (or use
+Docker Desktop on WSL2). For WSL2, ensure Docker Desktop's WSL integration
+is enabled for your distro (Settings → Resources → WSL integration), then
+run the bash scripts from inside the WSL shell:
+```bash
+sudo apt-get update && sudo apt-get install -y curl python3
+docker scout version       # verify
+./scripts/build.sh
+```
+
+**Windows (native, no WSL).** Install
+[PowerShell 7+](https://learn.microsoft.com/en-us/powershell/scripting/install/installing-powershell-on-windows)
+and Docker Desktop for Windows. Allow script execution if you haven't
+already (one-time, per-user):
+```powershell
+Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
+```
+Then from the repo root in PowerShell:
+```powershell
+.\scripts\build.ps1
+.\scripts\verify.ps1 -CheckPin
+.\scripts\update.ps1 -Apply
+```
 
 ## Obtaining the upstream images
 
@@ -127,16 +164,143 @@ endpoint isn't usable for this (~20k commit-SHA tags drown out semver).
 
 ### Automation (optional)
 
-Pick whatever fits your environment:
+Goal: notice drift early without having to remember. The scripts'
+`--check-pin` / `-CheckPin` mode is fast (no Docker, two HTTP calls) and
+returns a clean exit code — exactly what schedulers want.
 
-| Mechanism | Setup | Cost |
+| Platform | Mechanism | Cost |
 |---|---|---|
-| **Mac local cron** | `crontab -e`, add weekly call to `verify.sh --check-pin`, pipe to `osascript` for a notification or to email | $0, runs only on your laptop |
-| **GitHub Actions** | Add a weekly `schedule:` workflow that runs `--check-pin` and opens a PR if drift > 0 | $0 — Actions is **free with no minute cap on public repos** ([docs](https://docs.github.com/en/billing/managing-billing-for-your-products/managing-billing-for-github-actions/about-billing-for-github-actions)) |
-| **Manual** | Run `./scripts/update.sh` whenever you remember | $0 |
+| macOS / Linux / WSL | user **cron** (or systemd-timer / launchd) | $0 |
+| Windows native | **Task Scheduler** (PowerShell `Register-ScheduledTask`) | $0 |
+| Any (cloud-side) | **GitHub Actions** scheduled workflow | $0 — Actions is **free with no minute cap on public repos** ([docs](https://docs.github.com/en/billing/managing-billing-for-your-products/managing-billing-for-github-actions/about-billing-for-github-actions)) |
 
-A reference Actions workflow can be added later if wanted; not included
-by default to keep the repo dependency-free.
+#### macOS — `crontab` + `osascript` notification
+
+```bash
+# crontab -e
+# Mondays at 09:00 local. cd is required because the script reads ./.env.
+0 9 * * 1 cd "$HOME/projects/openhands-deployment" && \
+  ./scripts/verify.sh --check-pin >> /tmp/oh-deploy-pin.log 2>&1 || \
+  /usr/bin/osascript -e 'display notification "Run ./scripts/update.sh --apply" with title "OpenHands agent-server pin drift"'
+```
+
+Test the notification path immediately (without waiting for Monday):
+```bash
+cd ~/projects/openhands-deployment && ./scripts/verify.sh --check-pin; echo "exit=$?"
+```
+
+If you'd rather use **launchd** (better suited to laptops that may be
+asleep at 09:00), drop a plist into `~/Library/LaunchAgents/`:
+
+```xml
+<!-- ~/Library/LaunchAgents/com.openhands.deployment.checkpin.plist -->
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>             <string>com.openhands.deployment.checkpin</string>
+  <key>ProgramArguments</key>
+    <array>
+      <string>/bin/bash</string>
+      <string>-c</string>
+      <string>cd "$HOME/projects/openhands-deployment" &amp;&amp; ./scripts/verify.sh --check-pin || /usr/bin/osascript -e 'display notification "Run ./scripts/update.sh --apply" with title "OpenHands pin drift"'</string>
+    </array>
+  <key>StartCalendarInterval</key>
+    <dict>
+      <key>Weekday</key> <integer>1</integer>
+      <key>Hour</key>    <integer>9</integer>
+      <key>Minute</key>  <integer>0</integer>
+    </dict>
+  <key>RunAtLoad</key>         <false/>
+  <key>StandardOutPath</key>   <string>/tmp/oh-deploy-pin.log</string>
+  <key>StandardErrorPath</key> <string>/tmp/oh-deploy-pin.log</string>
+</dict>
+</plist>
+```
+
+Load it: `launchctl load ~/Library/LaunchAgents/com.openhands.deployment.checkpin.plist`.
+
+#### Linux / WSL2 — `crontab` + `notify-send` (or just a log)
+
+```bash
+# crontab -e
+0 9 * * 1 cd "$HOME/projects/openhands-deployment" && \
+  ./scripts/verify.sh --check-pin >> /tmp/oh-deploy-pin.log 2>&1 || \
+  notify-send "OpenHands pin drift" "Run ./scripts/update.sh --apply"
+```
+
+On WSL2, `notify-send` may not work without extra setup (libnotify isn't
+wired to Windows toast by default). Two simpler options that just work:
+
+- Append to a log file you `cat` when you log in (the `>> /tmp/oh-deploy-pin.log`
+  above already does this).
+- Pipe to `powershell.exe` from WSL to raise a Windows toast — see the
+  Windows section below for the toast snippet, then call it as
+  `powershell.exe -File ...` from cron.
+
+If you use **systemd timers** instead of cron:
+
+```ini
+# ~/.config/systemd/user/oh-checkpin.service
+[Service]
+Type=oneshot
+WorkingDirectory=%h/projects/openhands-deployment
+ExecStart=%h/projects/openhands-deployment/scripts/verify.sh --check-pin
+
+# ~/.config/systemd/user/oh-checkpin.timer
+[Unit]
+Description=Weekly OpenHands agent-server pin drift check
+[Timer]
+OnCalendar=Mon 09:00
+Persistent=true
+[Install]
+WantedBy=timers.target
+```
+
+Enable: `systemctl --user enable --now oh-checkpin.timer`.
+
+#### Windows — Task Scheduler via PowerShell
+
+Run **once** in an elevated PowerShell to register a weekly task that
+runs `verify.ps1 -CheckPin` and shows a Windows toast on drift:
+
+```powershell
+$repo = "$HOME\projects\openhands-deployment"   # adjust to your path
+
+$cmd = @"
+Set-Location '$repo'
+& '$repo\scripts\verify.ps1' -CheckPin
+if (`$LASTEXITCODE -eq 1) {
+    # Drift -> toast notification
+    [Windows.UI.Notifications.ToastNotificationManager,Windows.UI.Notifications,ContentType=WindowsRuntime] | Out-Null
+    [Windows.Data.Xml.Dom.XmlDocument,Windows.Data.Xml.Dom.XmlDocument,ContentType=WindowsRuntime] | Out-Null
+    `$xml = New-Object Windows.Data.Xml.Dom.XmlDocument
+    `$xml.LoadXml('<toast><visual><binding template="ToastGeneric"><text>OpenHands pin drift</text><text>Run .\scripts\update.ps1 -Apply</text></binding></visual></toast>')
+    `$toast = New-Object Windows.UI.Notifications.ToastNotification `$xml
+    [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('OpenHands').Show(`$toast)
+}
+"@
+
+$action  = New-ScheduledTaskAction `
+    -Execute 'pwsh.exe' `
+    -Argument "-NoProfile -Command `"$cmd`""
+$trigger = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Monday -At 9am
+Register-ScheduledTask -TaskName 'OpenHands-PinDrift' `
+    -Action $action -Trigger $trigger -Description 'Weekly drift check'
+```
+
+Test it once without waiting for Monday:
+```powershell
+Start-ScheduledTask -TaskName 'OpenHands-PinDrift'
+Get-ScheduledTaskInfo -TaskName 'OpenHands-PinDrift' | Select-Object LastRunTime, LastTaskResult
+```
+
+#### GitHub Actions (cloud-side, optional)
+
+A weekly workflow that runs `verify.sh --check-pin` and opens a PR when
+drift is detected. Not enabled by default; add as `.github/workflows/check-pin.yml`
+when you want it. Free for this public repo.
 
 ## Quick start
 
