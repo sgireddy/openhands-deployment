@@ -12,10 +12,12 @@
 #   ./scripts/update.sh --apply        # bump .env and run build.sh --yes
 #
 # Notes:
-#   - For ghcr.io we use the public anonymous token endpoint, no auth needed.
-#   - For other registries (e.g. internal mirrors) we hit the v2 catalog/tags
-#     API. If the registry requires auth, the script will surface the error
-#     and stop.
+#   - agent-server: we treat the OpenHands software-agent-sdk GitHub
+#     **releases** as the source of truth, then map vX.Y.Z → X.Y.Z-python
+#     to find the corresponding ghcr.io image tag. (GHCR's tags/list
+#     endpoint paginates ~20k+ entries with one semver tag per release
+#     buried among per-commit tags, so direct enumeration is impractical.)
+#   - openhands base image is operator-managed; not auto-discovered here.
 
 set -Eeuo pipefail
 
@@ -38,52 +40,58 @@ load_env
 command -v curl   >/dev/null || { err "curl required"; exit 1; }
 command -v python3 >/dev/null || { err "python3 required"; exit 1; }
 
-# --- registry tag listing ---------------------------------------------------
-list_ghcr_tags() { # $1 = "openhands/agent-server"
-    local repo="$1"
-    local token
-    token="$(curl -fsSL "https://ghcr.io/token?scope=repository:${repo}:pull" \
-        | python3 -c 'import json,sys;print(json.load(sys.stdin)["token"])')"
-    curl -fsSL -H "Authorization: Bearer $token" \
-        "https://ghcr.io/v2/${repo}/tags/list" \
-        | python3 -c 'import json,sys;[print(t) for t in json.load(sys.stdin).get("tags",[])]'
-}
+# --- discovery via GitHub releases ------------------------------------------
+SDK_REPO="OpenHands/software-agent-sdk"
 
-list_v2_tags() { # $1 = registry/repo (no tag), e.g. registry.example.com/myorg/openhands
-    local image="$1"
-    local registry="${image%%/*}"
-    local repo="${image#*/}"
-    curl -fsSL "https://${registry}/v2/${repo}/tags/list" 2>&1 \
+# Latest SDK release tag (e.g. "v1.19.0"). Empty string on failure.
+latest_sdk_release() {
+    local hdr=()
+    [[ -n "${GITHUB_TOKEN:-}" ]] && hdr=(-H "Authorization: Bearer $GITHUB_TOKEN")
+    curl -fsSL "${hdr[@]}" \
+        -H "Accept: application/vnd.github+json" \
+        "https://api.github.com/repos/${SDK_REPO}/releases/latest" 2>/dev/null \
         | python3 -c 'import json,sys
 try:
-    print("\n".join(json.load(sys.stdin).get("tags",[])))
-except Exception as e:
-    sys.stderr.write(f"warn: {e}\n")' 2>/dev/null || true
+    print(json.load(sys.stdin).get("tag_name",""))
+except Exception:
+    pass'
 }
 
-# Pick the newest tag matching a regex, by semver-ish sort.
-newest_matching() { # $1 = newline-separated tags, $2 = regex
-    local tags="$1" pattern="$2"
-    echo "$tags" | grep -E "$pattern" \
-        | sort -t. -k1,1n -k2,2n -k3,3n -V \
-        | tail -1
+# Verify the corresponding "<X.Y.Z>-python" tag exists on GHCR. Returns 0 if so.
+ghcr_tag_exists() { # $1 = repo (e.g. openhands/agent-server)  $2 = tag
+    local repo="$1" tag="$2" token
+    token="$(curl -fsSL "https://ghcr.io/token?scope=repository:${repo}:pull" \
+        | python3 -c 'import json,sys;print(json.load(sys.stdin)["token"])' 2>/dev/null)"
+    [[ -n "$token" ]] || return 1
+    local code
+    code="$(curl -sS -o /dev/null -w '%{http_code}' \
+        -H "Authorization: Bearer $token" \
+        -H "Accept: application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.v2+json,application/vnd.docker.distribution.manifest.list.v2+json" \
+        "https://ghcr.io/v2/${repo}/manifests/${tag}")"
+    [[ "$code" == "200" ]]
 }
 
 # --- find newer tags --------------------------------------------------------
 hdr "Discovering newer upstream tags"
 
-# agent-server is the only component this repo can meaningfully tag-discover,
-# because it's published to a known registry (ghcr.io/openhands/agent-server).
-#
-# OpenHands itself is built from source by the operator (`make build` in the
-# OpenHands source repo) and tagged locally — there's no canonical registry
-# we can query. If you've configured OPENHANDS_BASE_IMAGE to point at your
-# own internal registry, run `docker pull` against it manually.
-
-log "Querying ${AGENT_SERVER_BASE_IMAGE} ..."
-as_repo="${AGENT_SERVER_BASE_IMAGE#ghcr.io/}"
-as_tags="$(list_ghcr_tags "$as_repo" 2>/dev/null || true)"
-as_newest="$(newest_matching "$as_tags" '^[0-9]+\.[0-9]+\.[0-9]+-python$' || true)"
+# agent-server: SDK GitHub releases → derive expected image tag → verify on GHCR.
+log "Querying github.com/${SDK_REPO}/releases/latest ..."
+sdk_tag="$(latest_sdk_release)"
+if [[ -z "$sdk_tag" ]]; then
+    warn "  could not reach GitHub releases API (rate limit? offline?)"
+    as_newest=""
+else
+    # Strip leading "v": v1.19.0 → 1.19.0
+    sdk_ver="${sdk_tag#v}"
+    candidate="${sdk_ver}-python"
+    log "  latest SDK release : $sdk_tag"
+    if ghcr_tag_exists "openhands/agent-server" "$candidate"; then
+        as_newest="$candidate"
+    else
+        warn "  ${candidate} not found on ghcr.io (mismatch between release and image publish)"
+        as_newest=""
+    fi
+fi
 log "  current  : ${AGENT_SERVER_BASE_TAG}"
 log "  newest   : ${as_newest:-<none-found>}"
 

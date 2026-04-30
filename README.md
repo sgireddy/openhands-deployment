@@ -84,15 +84,26 @@ that instead.
 
 **`ghcr.io/openhands/agent-server:<version>-python`** is published publicly
 on GHCR by the [software-agent-sdk](https://github.com/OpenHands/software-agent-sdk)
-project. No login required:
+project. Each SDK GitHub release `vX.Y.Z` produces a corresponding image
+tag `X.Y.Z-python`. No login required:
 
 ```bash
 docker pull ghcr.io/openhands/agent-server:1.19.0-python
 ```
 
-Set the version you want in `.env` (`AGENT_SERVER_BASE_TAG`); the default in
-`.env.example` tracks a known-good release. Run `./scripts/update.sh` to
-discover newer tags.
+The default in `.env.example` is intentionally pinned, not floating, so
+that `./scripts/build.sh` produces a deterministic `:custom_base`. To find
+out whether you're behind:
+
+```bash
+./scripts/update.sh                # read-only; queries the SDK release feed
+./scripts/update.sh --apply        # bumps .env and reruns build.sh
+```
+
+`update.sh` uses the `software-agent-sdk` GitHub releases API as the
+authoritative source (the GHCR tag list paginates ~20k commit-SHA tags
+which is impractical to enumerate), then verifies the matching
+`X.Y.Z-python` exists on GHCR before bumping.
 
 ## Quick start
 
