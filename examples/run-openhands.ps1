@@ -24,15 +24,29 @@
     don't run a proxy, replace with the upstream provider URL or set it
     to an empty string and let openhands use its built-in defaults.
 
+.PARAMETER InstanceName
+    A unique name used to scope EVERY piece of per-instance state:
+    container name, data dir, log files, pidfile. Default is
+    "openhands-<Port>" so that running
+
+        .\run-openhands.ps1 -Port 3010 -Model 'anthropic/claude-...'
+        .\run-openhands.ps1 -Port 3020 -Model 'openai/gpt-...'
+
+    in two different terminals leaves you with two simultaneous
+    instances (openhands-3010 + openhands-3020) — different ports,
+    different containers, different conversation DBs, no collisions.
+    Override only if you want a friendlier name like "claude-prod".
+
 .PARAMETER DeployHome
     Parent dir for all runtime state and logs.
     Default: $HOME\openhands-deployment.
-    Sub-paths created beneath it:
-        $DeployHome\data\state
-        $DeployHome\data\workspace
-        $DeployHome\data\.openhands
-        $DeployHome\openhands.log         (container stdout)
-        $DeployHome\openhands.err.log     (container stderr)
+    Sub-paths (one set per instance, scoped by InstanceName):
+        $DeployHome\<InstanceName>\state
+        $DeployHome\<InstanceName>\workspace
+        $DeployHome\<InstanceName>\.openhands
+        $DeployHome\<InstanceName>.log         (container stdout)
+        $DeployHome\<InstanceName>.err.log     (container stderr)
+        $DeployHome\<InstanceName>.pid         (log-tailer PID)
 
 .PARAMETER AgentServerRepo
     Repo of the hardened agent-server image. Default: agent-server.
@@ -71,6 +85,18 @@
 
 .EXAMPLE
     .\examples\run-openhands.ps1 -Port 8080 -Model 'anthropic/claude-sonnet-4-5'
+
+.EXAMPLE
+    # Two simultaneous instances bound to different ports / models.
+    # They get distinct container names, distinct data dirs, distinct logs.
+    .\examples\run-openhands.ps1 -Port 3010 -Model 'anthropic/claude-sonnet-4-5'
+    .\examples\run-openhands.ps1 -Port 3020 -Model 'openai/gpt-5'
+
+    # ...then in another shell:
+    docker ps --filter name=openhands-
+    # CONTAINER ID   IMAGE                     ...   NAMES
+    # abc123...      openhands:custom_base     ...   openhands-3010
+    # def456...      openhands:custom_base     ...   openhands-3020
 #>
 
 [CmdletBinding()]
@@ -78,6 +104,7 @@ param(
     [int]    $Port             = 3000,
     [string] $Model            = 'litellm_proxy/your-model-alias',
     [string] $BaseUrl          = 'http://host.docker.internal:4000',
+    [string] $InstanceName,
     [string] $DeployHome,
     [string] $AgentServerRepo  = 'agent-server',
     [string] $AgentServerTag   = 'custom_base'
@@ -86,22 +113,55 @@ param(
 $ErrorActionPreference = 'Stop'
 
 # ----- configuration --------------------------------------------------------
-$ContainerName = 'openhands'
-$Image         = 'openhands:custom_base'   # built by ..\scripts\build.ps1
+$Image = 'openhands:custom_base'   # built by ..\scripts\build.ps1
+
+# Per-instance scoping. Defaults to "openhands-<Port>" so that two runs on
+# different ports get distinct container names + state automatically. The
+# user can also pass a friendlier name like 'claude-prod' if they prefer.
+# Sanity: dropping any character docker rejects in container names,
+# leaving only what is actually allowed: [a-zA-Z0-9_.-]. This protects us
+# if someone passes -InstanceName "openhands prod" or similar.
+if (-not $InstanceName) {
+    $InstanceName = "openhands-$Port"
+}
+# Reject up-front if the input contains zero docker-legal characters
+# (alnum / _ / .), otherwise we'd silently produce a name made of only
+# replacement dashes.
+if ($InstanceName -notmatch '[a-zA-Z0-9_.]') {
+    Write-Host "InstanceName '$InstanceName' has no valid characters [a-zA-Z0-9_.]; cannot continue." -ForegroundColor Red
+    exit 1
+}
+# Substitute all illegal chars with '-', collapse runs of '-', strip
+# leading/trailing '-'.
+$InstanceName = ($InstanceName -replace '[^a-zA-Z0-9_.\-]', '-')
+$InstanceName = ($InstanceName -replace '-+', '-').Trim('-')
+$ContainerName = $InstanceName
 
 # Allow override via parameter or env var; otherwise default outside the repo.
 # Mirror of $DEPLOY_HOME from the bash version.
 if (-not $DeployHome) {
     $DeployHome = if ($env:DEPLOY_HOME) { $env:DEPLOY_HOME } else { Join-Path $HOME 'openhands-deployment' }
 }
-$DataDir = Join-Path $DeployHome 'data'
+
+# Per-instance data dir. Replaces the previous fixed "data/" path. Each
+# instance gets its OWN state, workspace, and .openhands folder so that
+# two simultaneous instances cannot corrupt each other's conversation
+# DB or settings store.
+#
+# MIGRATION: existing single-instance users had everything under
+# $DeployHome\data\{state,workspace,.openhands}. To preserve their
+# history when moving to this version, rename that directory once:
+#   Rename-Item "$DeployHome\data" "$DeployHome\openhands-3000"
+$DataDir = Join-Path $DeployHome $InstanceName
+
 # Two log files because Start-Process refuses to redirect both streams to
 # the same path. stdout has the bulk of useful logs; stderr is rarely
 # populated by `docker logs -f` but kept separate so neither stream is
 # silently dropped. To get a merged tail:
-#   Get-Content $DeployHome\openhands.log, $DeployHome\openhands.err.log -Wait
-$LogFile    = Join-Path $DeployHome 'openhands.log'
-$LogFileErr = Join-Path $DeployHome 'openhands.err.log'
+#   Get-Content $DeployHome\<instance>.log, $DeployHome\<instance>.err.log -Wait
+$LogFile    = Join-Path $DeployHome ("{0}.log"     -f $InstanceName)
+$LogFileErr = Join-Path $DeployHome ("{0}.err.log" -f $InstanceName)
+$pidFile    = Join-Path $DeployHome ("{0}.pid"     -f $InstanceName)
 
 function Write-Status {
     param([string]$Text, [string]$Color = 'Gray')
@@ -148,14 +208,15 @@ foreach ($d in @(
     New-Item -ItemType Directory -Force -Path $d | Out-Null
 }
 
-# Remove any prior container with the same name. Don't fail if absent.
+# Remove any prior container WITH THE SAME INSTANCE NAME. Don't fail if
+# absent. This deliberately does NOT touch other instances — re-running
+# `-Port 3010` only restarts openhands-3010 and leaves openhands-3020
+# running.
 & docker rm -f $ContainerName *> $null
 
-# Stop any previously-detached `docker logs -f openhands` tailer started by
-# a prior run. Match by command line. The pid-file pattern (below) is what
-# we rely on for clean shutdown; this is just a belt-and-braces fallback
-# for upgrade paths from older versions of the script.
-$pidFile = Join-Path $DeployHome 'log-tailer.pid'
+# Stop the prior `docker logs -f` tailer for THIS instance only, by
+# reading the per-instance pidfile written at the end of the previous
+# run. $pidFile was already computed above as $DeployHome\<instance>.pid.
 if (Test-Path -LiteralPath $pidFile) {
     $oldPid = Get-Content -LiteralPath $pidFile -ErrorAction SilentlyContinue
     if ($oldPid) {
@@ -229,13 +290,22 @@ $tailer = Start-Process @startProcArgs
 Set-Content -LiteralPath $pidFile -Value $tailer.Id -Encoding ascii
 
 # ----- summary --------------------------------------------------------------
-Write-Status 'OpenHands backgrounded.' Green
-Write-Host  ('UI:           http://localhost:{0}' -f $Port)
-Write-Host  ('Web image:    {0}' -f $Image)
-Write-Host  ('Sandbox img:  {0}:{1}' -f $AgentServerRepo, $AgentServerTag)
+Write-Status ('{0} backgrounded.' -f $InstanceName) Green
+Write-Host  ('Instance:      {0}' -f $InstanceName)
+Write-Host  ('UI:            http://localhost:{0}' -f $Port)
+Write-Host  ('Web image:     {0}' -f $Image)
+Write-Host  ('Sandbox img:   {0}:{1}' -f $AgentServerRepo, $AgentServerTag)
+Write-Host  ('Data dir:      {0}' -f $DataDir)
 Write-Host  ('Logs (stdout): {0}' -f $LogFile)
 Write-Host  ('Logs (stderr): {0}' -f $LogFileErr)
 Write-Host  ('Tailer PID:    {0}  (stop with: Stop-Process -Id {0})' -f $tailer.Id)
+Write-Host  ''
+Write-Host  'Stop this instance only:'
+Write-Host  ('  docker rm -f {0}' -f $InstanceName)
+Write-Host  ('  Stop-Process -Id {0}' -f $tailer.Id)
+Write-Host  ''
+Write-Host  'List all instances launched by this script:'
+Write-Host  "  docker ps --filter name=openhands- --format 'table {{.Names}}\t{{.Ports}}\t{{.Status}}'"
 Write-Host  ''
 Write-Host  'Verify the sandbox image is being used by spawning a conversation'
 Write-Host  'in the UI, then run:'
