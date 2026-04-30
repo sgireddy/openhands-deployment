@@ -48,9 +48,10 @@ upstream image  ──►  overlay (apt-get upgrade, optional pip pins)  ──�
 │   ├── verify.sh / verify.ps1   # scan-only mode + --check-pin
 │   └── update.sh / update.ps1   # find newer SDK release, optionally rebuild
 └── examples/
-    └── run-openhands.sh         # reference invocation that wires the
+    └── run-openhands.sh / .ps1  # reference invocation that wires the
                                  # hardened openhands + agent-server images
                                  # together via AGENT_SERVER_IMAGE_REPOSITORY/TAG
+                                 # (zsh on macOS/Linux, PowerShell on Windows)
 ```
 
 The **bash** scripts (`*.sh`) and **PowerShell** scripts (`*.ps1`) are
@@ -336,6 +337,36 @@ docker compose -f compose/docker-compose.yml --env-file .env up -d
 under `$HOME/openhands-deployment/reports/<UTC-timestamp>/` — see *Local
 on-disk layout* below.
 
+### Alternate: launch without compose
+
+For environments where you'd rather not use `docker compose` (e.g. you
+want one-shot bring-up with explicit env vars and detached log tailing),
+the `examples/` directory has reference scripts that issue a single
+`docker run`:
+
+```bash
+# macOS / Linux (zsh)
+export OH_SECRET_KEY=$(openssl rand -hex 32)
+./examples/run-openhands.sh                            # default port 3000
+./examples/run-openhands.sh 8080 'anthropic/claude-sonnet-4-5'
+```
+
+```powershell
+# Windows (PowerShell 5.1+ or PowerShell 7+)
+$env:OH_SECRET_KEY = (python -c "import secrets;print(secrets.token_hex(32))")
+.\examples\run-openhands.ps1                           # default port 3000
+.\examples\run-openhands.ps1 -Port 8080 -Model 'anthropic/claude-sonnet-4-5'
+```
+
+Both ports write runtime state to `$DEPLOY_HOME` (default
+`$HOME/openhands-deployment` — same parent dir the compose flow uses for
+`workspace/` and `reports/`), and detach a `docker logs -f` tailer that
+appends to `openhands.log` (the PowerShell port additionally splits
+stderr into `openhands.err.log` because `Start-Process` cannot redirect
+both streams to the same file). The tailer's PID is recorded at
+`$DEPLOY_HOME/log-tailer.pid` so the next run cleans it up before
+launching a fresh one.
+
 ## Local on-disk layout
 
 By design, **nothing in this repo writes runtime state inside the cloned
@@ -346,8 +377,9 @@ a single parent under your home directory:
 $HOME/openhands-deployment/
 ├── reports/<UTC-timestamp>/    # build.sh / verify.sh scout output
 ├── workspace/                  # WORKSPACE_BASE for compose (sandbox files)
-├── data/                       # examples/run-openhands.sh container state
-└── openhands.log               # examples/run-openhands.sh container log
+├── data/                       # examples/run-openhands.{sh,ps1} container state
+├── openhands.log               # examples/run-openhands.{sh,ps1} container stdout
+└── openhands.err.log           # examples/run-openhands.ps1 container stderr (Windows only)
 ```
 
 This is intentional defense-in-depth:
@@ -367,7 +399,7 @@ Override env vars (any subset):
 |---|---|---|
 | `REPORTS_DIR` | `$HOME/openhands-deployment/reports` | `scripts/build.{sh,ps1}`, `scripts/verify.{sh,ps1}` |
 | `WORKSPACE_BASE` | `$HOME/openhands-deployment/workspace` | `compose/docker-compose.yml` |
-| `DEPLOY_HOME` | `$HOME/openhands-deployment` | `examples/run-openhands.sh` (groups `data/` and `openhands.log` under one parent) |
+| `DEPLOY_HOME` | `$HOME/openhands-deployment` | `examples/run-openhands.{sh,ps1}` (groups `data/` and the log files under one parent). On the PowerShell port the same effect is also achievable via the `-DeployHome` parameter. |
 
 ## Configuration
 
