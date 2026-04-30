@@ -1,8 +1,18 @@
 #!/usr/bin/env bash
-# scripts/build.sh — pull, scan, overlay, scan, verify policy.
+# scripts/build.sh — scan upstream, overlay, scan again, verify policy.
+#
+# This script ASSUMES the upstream images already exist locally. It does NOT
+# pull anything. Procuring the upstream images is the operator's job:
+#
+#   - openhands:latest               built from the OpenHands source repo
+#                                    (`make build`) or pulled from whichever
+#                                    registry your fleet uses.
+#   - ghcr.io/openhands/agent-server:<tag>
+#                                    `docker pull ghcr.io/openhands/agent-server:1.19.0-python`
+#                                    (public — no auth needed for read).
 #
 # For each component (openhands, agent-server):
-#   1. Pull the upstream image.
+#   1. Verify the upstream image is in the local cache; bail clearly if not.
 #   2. Scout-scan it as the BASELINE.
 #   3. Build the local hardening overlay → <out>:<custom_base>.
 #   4. Scout-scan the result.
@@ -13,11 +23,10 @@
 #   ./scripts/build.sh openhands           # one component
 #   ./scripts/build.sh agent-server        # one component
 #   ./scripts/build.sh --yes               # non-interactive
-#   ./scripts/build.sh --no-pull           # use whatever's already cached
 #
 # Exit codes:
 #   0  all components built and within policy
-#   1  hard error (missing tools, bad config)
+#   1  hard error (missing tools, bad config, missing upstream image, build failed)
 #   2  policy violated (Critical > limit) on at least one component
 
 set -Eeuo pipefail
@@ -29,12 +38,10 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # --- arg parse --------------------------------------------------------------
 COMPONENTS=()
 ASSUME_YES=0
-DO_PULL=1
 while (( $# )); do
     case "$1" in
         openhands|agent-server) COMPONENTS+=("$1"); shift ;;
         --yes|-y)               ASSUME_YES=1; shift ;;
-        --no-pull)              DO_PULL=0; shift ;;
         -h|--help)
             awk 'NR>1 && /^#/ {sub(/^# ?/,""); print; next} {exit}' "$0"
             exit 0 ;;
@@ -55,7 +62,11 @@ mkdir -p "$RUN_DIR"
 log "Reports → $RUN_DIR"
 
 # --- per-component build function ------------------------------------------
-build_component() { # $1 = component name (openhands | agent-server)
+# Returns:
+#   0  success and within policy
+#   1  hard error (image missing, build failed)
+#   2  policy violation
+build_component() {
     local comp="$1"
     local base_image base_tag out_image out_tag dockerfile pip_upgrades
 
@@ -82,59 +93,75 @@ build_component() { # $1 = component name (openhands | agent-server)
 
     hdr "[$comp] upstream=$upstream  →  hardened=$hardened"
 
-    # 1. pull
-    if (( DO_PULL )); then
-        log "[$comp] pulling $upstream"
-        docker pull "$upstream"
-    else
-        log "[$comp] --no-pull: using cached $upstream"
-        docker image inspect "$upstream" >/dev/null 2>&1 \
-            || { err "[$comp] $upstream not in local cache"; return 1; }
+    # 1. require upstream to be in the local cache. We don't pull.
+    if ! docker image inspect "$upstream" >/dev/null 2>&1; then
+        err "[$comp] upstream image not found locally: $upstream"
+        err "  This script does not pull upstream images. Obtain it first, e.g.:"
+        case "$comp" in
+            openhands)
+                err "    cd /path/to/OpenHands && make build" ;;
+            agent-server)
+                err "    docker pull $upstream" ;;
+        esac
+        return 1
     fi
+    ok "[$comp] upstream cached: $upstream"
 
     # 2. baseline scan
-    scout_scan "$upstream" "${comp}-01-baseline" "$RUN_DIR"
+    scout_scan "$upstream" "${comp}-01-baseline" "$RUN_DIR" \
+        || { err "[$comp] baseline scout scan failed"; return 1; }
     local b_counts; b_counts="$(scout_counts "$RUN_DIR/${comp}-01-baseline-quickview.txt")"
     local b_crit="${b_counts%%:*}" b_high="${b_counts##*:}"
     log "[$comp] baseline           : ${b_crit}C / ${b_high}H"
 
     # 3. overlay build
     hdr "[$comp] building overlay → $hardened"
-    docker build \
-        -f "$REPO_ROOT/$dockerfile" \
-        --build-arg "BASE_IMAGE=$upstream" \
-        --build-arg "PIP_UPGRADES=$pip_upgrades" \
-        --no-cache \
-        -t "$hardened" \
-        "$REPO_ROOT"
+    if ! docker build \
+            -f "$REPO_ROOT/$dockerfile" \
+            --build-arg "BASE_IMAGE=$upstream" \
+            --build-arg "PIP_UPGRADES=$pip_upgrades" \
+            --no-cache \
+            -t "$hardened" \
+            "$REPO_ROOT"; then
+        err "[$comp] overlay build failed; see error above"
+        return 1
+    fi
     ok "[$comp] built $hardened"
 
     # 4. post-overlay scan
-    scout_scan "$hardened" "${comp}-02-post-overlay" "$RUN_DIR"
+    scout_scan "$hardened" "${comp}-02-post-overlay" "$RUN_DIR" \
+        || { err "[$comp] post-overlay scout scan failed"; return 1; }
     local p_counts; p_counts="$(scout_counts "$RUN_DIR/${comp}-02-post-overlay-quickview.txt")"
     local p_crit="${p_counts%%:*}" p_high="${p_counts##*:}"
     log "[$comp] after overlay      : ${p_crit}C / ${p_high}H   (was ${b_crit}C / ${b_high}H)"
 
     # 5. policy gate
-    local verdict; verdict="$(policy_check "$p_crit" "$p_high")" || true
+    local verdict rc
+    set +e
+    verdict="$(policy_check "$p_crit" "$p_high")"
+    rc=$?
+    set -e
     case "$verdict" in
         PASS*)    ok "[$comp] policy: $verdict" ;;
         FAIL*)    err "[$comp] policy: $verdict";  return 2 ;;
         UNKNOWN*) warn "[$comp] policy: $verdict" ;;
     esac
+    return $rc
 }
 
 # --- run all requested components ------------------------------------------
 exit_code=0
 for comp in "${COMPONENTS[@]}"; do
-    if ! build_component "$comp"; then
-        rc=$?
-        if (( rc == 2 )); then
-            exit_code=2
-        else
-            exit 1
-        fi
-    fi
+    set +e
+    build_component "$comp"
+    rc=$?
+    set -e
+    case $rc in
+        0)  ;;                                  # ok
+        2)  exit_code=2 ;;                      # policy violation, keep going
+        *)  err "build_component '$comp' failed (rc=$rc); aborting"
+            exit 1 ;;
+    esac
 done
 
 hdr "Summary"

@@ -3,25 +3,25 @@
 # Hardening overlay for the OpenHands web/orchestration image.
 #
 # Builds a locally-tagged image (default: openhands:custom_base) on top of the
-# upstream image (default: docker.all-hands.dev/all-hands-ai/openhands:latest)
-# by applying OS package security upgrades and, optionally, a curated set of
-# Python package upgrades inside the runtime venv.
+# upstream image (default: openhands:latest — built locally via `make build`
+# in the OpenHands source repo) by applying OS package security upgrades and,
+# optionally, a curated set of Python package upgrades inside the runtime venv.
 #
 # This file does NOT depend on the OpenHands source tree — it consumes a
 # published image. Build context can be empty.
 #
 # Build:
 #   docker build -f overlays/Dockerfile.openhands \
-#       --build-arg BASE_IMAGE=docker.all-hands.dev/all-hands-ai/openhands:latest \
+#       --build-arg BASE_IMAGE=openhands:latest \
 #       -t openhands:custom_base .
 #
 # With Python upgrades:
 #   docker build -f overlays/Dockerfile.openhands \
-#       --build-arg BASE_IMAGE=docker.all-hands.dev/all-hands-ai/openhands:latest \
+#       --build-arg BASE_IMAGE=openhands:latest \
 #       --build-arg PIP_UPGRADES="urllib3==2.5.0 cryptography==45.0.0" \
 #       -t openhands:custom_base .
 
-ARG BASE_IMAGE=docker.all-hands.dev/all-hands-ai/openhands:latest
+ARG BASE_IMAGE=openhands:latest
 FROM ${BASE_IMAGE}
 
 ARG BASE_IMAGE

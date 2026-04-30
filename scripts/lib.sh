@@ -31,7 +31,7 @@ load_env() {
         # shellcheck disable=SC1091
         set -a; . "$REPO_ROOT/.env"; set +a
     fi
-    : "${OPENHANDS_BASE_IMAGE:=docker.all-hands.dev/all-hands-ai/openhands}"
+    : "${OPENHANDS_BASE_IMAGE:=openhands}"
     : "${OPENHANDS_BASE_TAG:=latest}"
     : "${AGENT_SERVER_BASE_IMAGE:=ghcr.io/openhands/agent-server}"
     : "${AGENT_SERVER_BASE_TAG:=1.19.0-python}"

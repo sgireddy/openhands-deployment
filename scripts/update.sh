@@ -13,8 +13,9 @@
 #
 # Notes:
 #   - For ghcr.io we use the public anonymous token endpoint, no auth needed.
-#   - For docker.all-hands.dev we hit the v2 catalog/tags API. If the registry
-#     requires auth, the script will surface the error and stop.
+#   - For other registries (e.g. internal mirrors) we hit the v2 catalog/tags
+#     API. If the registry requires auth, the script will surface the error
+#     and stop.
 
 set -Eeuo pipefail
 
@@ -48,7 +49,7 @@ list_ghcr_tags() { # $1 = "openhands/agent-server"
         | python3 -c 'import json,sys;[print(t) for t in json.load(sys.stdin).get("tags",[])]'
 }
 
-list_v2_tags() { # $1 = registry/repo (no tag), e.g. docker.all-hands.dev/all-hands-ai/openhands
+list_v2_tags() { # $1 = registry/repo (no tag), e.g. registry.example.com/myorg/openhands
     local image="$1"
     local registry="${image%%/*}"
     local repo="${image#*/}"
@@ -71,7 +72,14 @@ newest_matching() { # $1 = newline-separated tags, $2 = regex
 # --- find newer tags --------------------------------------------------------
 hdr "Discovering newer upstream tags"
 
-# agent-server: tags look like 1.19.0-python, 1.20.0-python, etc.
+# agent-server is the only component this repo can meaningfully tag-discover,
+# because it's published to a known registry (ghcr.io/openhands/agent-server).
+#
+# OpenHands itself is built from source by the operator (`make build` in the
+# OpenHands source repo) and tagged locally — there's no canonical registry
+# we can query. If you've configured OPENHANDS_BASE_IMAGE to point at your
+# own internal registry, run `docker pull` against it manually.
+
 log "Querying ${AGENT_SERVER_BASE_IMAGE} ..."
 as_repo="${AGENT_SERVER_BASE_IMAGE#ghcr.io/}"
 as_tags="$(list_ghcr_tags "$as_repo" 2>/dev/null || true)"
@@ -79,12 +87,8 @@ as_newest="$(newest_matching "$as_tags" '^[0-9]+\.[0-9]+\.[0-9]+-python$' || tru
 log "  current  : ${AGENT_SERVER_BASE_TAG}"
 log "  newest   : ${as_newest:-<none-found>}"
 
-# openhands: tags look like 0.x.y or "latest"
-log "Querying ${OPENHANDS_BASE_IMAGE} ..."
-oh_tags="$(list_v2_tags "$OPENHANDS_BASE_IMAGE" || true)"
-oh_newest="$(newest_matching "$oh_tags" '^[0-9]+\.[0-9]+\.[0-9]+$' || true)"
-log "  current  : ${OPENHANDS_BASE_TAG}"
-log "  newest   : ${oh_newest:-<none-found>} (or 'latest')"
+oh_newest=""   # placeholder for --apply path below; openhands not auto-discovered
+log "OpenHands base image (${OPENHANDS_BASE_IMAGE}:${OPENHANDS_BASE_TAG}) is operator-managed; not auto-discovered."
 
 # --- apply ------------------------------------------------------------------
 if (( ! APPLY )); then
