@@ -64,14 +64,19 @@ upstream image  ──►  overlay (apt-get upgrade, optional pip pins)  ──�
 git clone https://github.com/sgireddy/openhands-deployment.git
 cd openhands-deployment
 
-# 1. Pick image tags + runtime config
+# 1. (optional) Override defaults — image tags, scan policy, etc.
+#    Skip this if the defaults in .env.example are fine; build.sh works
+#    without an .env file at all.
 cp .env.example .env
-$EDITOR .env                          # set LLM_API_KEY etc.
+$EDITOR .env
 
-# 2. Build & verify the hardened images
+# 2. Build & verify the hardened images. Needs Docker + Scout only.
+#    No LLM credentials, no GitHub auth, nothing else required.
 ./scripts/build.sh
 
-# 3. Run
+# 3. To actually run OpenHands, set runtime secrets in .env first
+#    (LLM_API_KEY, LLM_MODEL, LLM_BASE_URL) — these are read at compose-up,
+#    not at build-time.
 docker compose -f compose/docker-compose.yml --env-file .env up -d
 # → http://localhost:3000
 ```
