@@ -62,7 +62,9 @@ fi
 require_tools
 report_drift
 
-RUN_DIR="$REPO_ROOT/reports/verify-$(date -u +%Y%m%dT%H%M%SZ)"
+# See note in build.sh about why REPORTS_DIR defaults outside the repo.
+REPORTS_DIR="${REPORTS_DIR:-$HOME/openhands-deployment/reports}"
+RUN_DIR="$REPORTS_DIR/verify-$(date -u +%Y%m%dT%H%M%SZ)"
 mkdir -p "$RUN_DIR"
 
 resolve_image() {

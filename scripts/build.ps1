@@ -53,7 +53,16 @@ if (-not $Component) { $Component = @('openhands','agent-server') }
 Load-Env -RepoRoot $RepoRoot
 Test-Tools
 
-$RunDir = Join-Path $RepoRoot ("reports/{0}" -f (Get-Date -Format 'yyyyMMddTHHmmssZ' -AsUTC))
+# Reports default to OUTSIDE the repo so build artifacts can never accidentally
+# be staged or pushed. Override with $env:REPORTS_DIR to redirect anywhere.
+# The repo's .gitignore still excludes a stray reports/ directory as a
+# belt-and-braces backstop.
+$reportsRoot = if ($env:REPORTS_DIR) {
+    $env:REPORTS_DIR
+} else {
+    Join-Path $HOME 'openhands-deployment/reports'
+}
+$RunDir = Join-Path $reportsRoot (Get-Date -Format 'yyyyMMddTHHmmssZ' -AsUTC)
 New-Item -ItemType Directory -Force -Path $RunDir | Out-Null
 Log-Info ("Reports -> {0}" -f $RunDir)
 

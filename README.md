@@ -333,7 +333,41 @@ docker compose -f compose/docker-compose.yml --env-file .env up -d
 
 `build.sh` exits non-zero if the post-overlay image still violates policy
 (`POLICY_MAX_CRITICAL` from `.env`, default `0`). Reports for each run land
-under `reports/<UTC-timestamp>/` (gitignored).
+under `$HOME/openhands-deployment/reports/<UTC-timestamp>/` — see *Local
+on-disk layout* below.
+
+## Local on-disk layout
+
+By design, **nothing in this repo writes runtime state inside the cloned
+working tree**. All script-generated artifacts and runtime data default to
+a single parent under your home directory:
+
+```
+$HOME/openhands-deployment/
+├── reports/<UTC-timestamp>/    # build.sh / verify.sh scout output
+├── workspace/                  # WORKSPACE_BASE for compose (sandbox files)
+├── data/                       # examples/run-openhands.sh container state
+└── openhands.log               # examples/run-openhands.sh container log
+```
+
+This is intentional defense-in-depth:
+
+1. Defaults point outside the repo so accidents (like `git add -A` after a
+   long session, or an IDE auto-staging files) cannot stage runtime data
+   that may include API keys, session tokens, conversation prompts, or
+   code the agent generated.
+2. The repo's `.gitignore` is *also* configured to exclude `reports/`,
+   `workspace/`, `data/`, `*.log`, etc. as a backstop — so even if you
+   override a default back inside the tree (e.g. `WORKSPACE_BASE=./ws`),
+   nothing leaks.
+
+Override env vars (any subset):
+
+| Variable | Default | Used by |
+|---|---|---|
+| `REPORTS_DIR` | `$HOME/openhands-deployment/reports` | `scripts/build.{sh,ps1}`, `scripts/verify.{sh,ps1}` |
+| `WORKSPACE_BASE` | `$HOME/openhands-deployment/workspace` | `compose/docker-compose.yml` |
+| `DEPLOY_HOME` | `$HOME/openhands-deployment` | `examples/run-openhands.sh` (groups `data/` and `openhands.log` under one parent) |
 
 ## Configuration
 
@@ -348,7 +382,7 @@ All knobs live in `.env`. Defaults are visible in `.env.example`.
 | `OPENHANDS_OUT_IMAGE/TAG`     | `openhands:custom_base`                        | Locally-built hardened image |
 | `AGENT_SERVER_OUT_IMAGE/TAG`  | `agent-server:custom_base`                     | Locally-built hardened image |
 | `HOST_PORT`                   | `3000`                                         | Host port for the web UI |
-| `WORKSPACE_BASE`              | `./workspace`                                  | Mounted into the orchestrator and sandboxes |
+| `WORKSPACE_BASE`              | `${HOME}/openhands-deployment/workspace`       | Mounted into the orchestrator and sandboxes. Always use an absolute path; see *Local on-disk layout*. |
 | `POLICY_MAX_CRITICAL`         | `0`                                            | Max allowed CRITICAL CVEs after overlay |
 | `POLICY_MAX_HIGH`             | *(unbounded)*                                  | Max allowed HIGH CVEs (empty = no limit) |
 | `PIP_UPGRADES_OPENHANDS`      | *(empty)*                                      | Whitespace-separated pip specs to upgrade in the overlay |
@@ -384,20 +418,27 @@ Then `./scripts/build.sh agent-server`.
 
 ### Check what changed between baseline and hardened
 ```bash
-ls reports/                             # latest run is at the bottom
-diff -u reports/<latest>/openhands-01-baseline-quickview.txt \
-        reports/<latest>/openhands-02-post-overlay-quickview.txt
+REPORTS="${REPORTS_DIR:-$HOME/openhands-deployment/reports}"
+ls "$REPORTS"                           # latest run is at the bottom
+LATEST="$(ls "$REPORTS" | tail -1)"
+diff -u "$REPORTS/$LATEST/openhands-01-baseline-quickview.txt" \
+        "$REPORTS/$LATEST/openhands-02-post-overlay-quickview.txt"
 ```
 
 ## Security notes
 
+- **Defaults write outside the repo.** All script-generated artifacts and
+  runtime data land under `$HOME/openhands-deployment/` by default — see
+  *Local on-disk layout*. The repo's `.gitignore` is a *second* line of
+  defence in case an operator overrides defaults back inside the tree.
 - `.env` is gitignored. Never commit secrets.
-- `reports/` is gitignored. Scout output for *public* images is itself public
-  info, but keeping it out of git avoids accidental leakage if you later
-  point the overlays at a private registry.
 - The overlays themselves contain no credentials and produce no auth state.
 - Use SSH (`git@github.com:...`) or `credential.helper=osxkeychain` for the
   `origin` remote — never put a token in the URL.
+- If you ever need to inspect the runtime state directory, remember the
+  log file (`$DEPLOY_HOME/openhands.log`) can contain prompt/response
+  payloads when `LOG_LEVEL=DEBUG` is set, which may incidentally include
+  secrets. Treat it as sensitive even though it lives outside the repo.
 
 ## Limitations
 
