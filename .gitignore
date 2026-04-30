@@ -17,6 +17,9 @@ logs/
 workspace/
 data/
 .openhands/
+examples/openhands-data/
+examples/openhands.log
+examples/.openhands/
 
 # --- editor / OS noise ------------------------------------------------------
 .DS_Store
