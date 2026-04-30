@@ -1,0 +1,50 @@
+# syntax=docker/dockerfile:1.7
+#
+# Hardening overlay for the OpenHands agent-server (sandbox runtime) image.
+#
+# The agent-server image is what each conversation's sandbox runs inside. It
+# is published from the openhands software-agent-sdk repo, not from this
+# folder. This overlay layers OS + Python security patches on top without
+# touching that upstream.
+#
+# Build:
+#   docker build -f overlays/Dockerfile.agent-server \
+#       --build-arg BASE_IMAGE=ghcr.io/openhands/agent-server:1.19.0-python \
+#       -t agent-server:custom_base .
+#
+# With Python upgrades:
+#   docker build -f overlays/Dockerfile.agent-server \
+#       --build-arg BASE_IMAGE=ghcr.io/openhands/agent-server:1.19.0-python \
+#       --build-arg PIP_UPGRADES="urllib3==2.5.0 cryptography==45.0.0" \
+#       -t agent-server:custom_base .
+
+ARG BASE_IMAGE=ghcr.io/openhands/agent-server:1.19.0-python
+FROM ${BASE_IMAGE}
+
+ARG BASE_IMAGE
+ARG PIP_UPGRADES=""
+
+LABEL org.opencontainers.image.title="agent-server-hardened" \
+      org.opencontainers.image.description="Security overlay over ${BASE_IMAGE}: apt + python CVE patches." \
+      org.opencontainers.image.base.name="${BASE_IMAGE}" \
+      org.opencontainers.image.source="https://github.com/sgireddy/openhands-deployment"
+
+# ---- OS package security upgrades ------------------------------------------
+# The agent-server image typically runs as root to support sandbox operations
+# (chrooted filesystem ops, package installs, etc.) so we don't drop privs.
+USER root
+RUN apt-get update -y \
+    && apt-get -y upgrade \
+    && apt-get -y autoremove --purge \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# ---- Optional: Python package upgrades -------------------------------------
+# We don't assume a specific venv layout — use whichever `python` is on PATH.
+RUN if [ -n "$PIP_UPGRADES" ]; then \
+        echo ">>> Upgrading Python packages: $PIP_UPGRADES" \
+        && python -m pip install --no-cache-dir --upgrade $PIP_UPGRADES \
+        && python -m pip cache purge >/dev/null 2>&1 || true ; \
+    else \
+        echo ">>> No PIP_UPGRADES specified; skipping Python upgrades." ; \
+    fi

@@ -1,0 +1,46 @@
+# Hardened deployment of OpenHands.
+#
+# This compose file consumes the locally-built overlay images (defaults:
+# openhands:custom_base + agent-server:custom_base) produced by
+# ../scripts/build.sh. Tags are configurable via the .env file at the repo
+# root.
+#
+# Usage:
+#   cd ..             # repo root, where .env lives
+#   ./scripts/build.sh
+#   docker compose -f compose/docker-compose.yml --env-file .env up -d
+#
+# This file does NOT bake any secrets. Runtime secrets (LLM API keys, etc.)
+# come from .env via docker compose's --env-file or env-substitution.
+
+services:
+  openhands:
+    image: ${OPENHANDS_OUT_IMAGE:-openhands}:${OPENHANDS_OUT_TAG:-custom_base}
+    container_name: openhands
+    pull_policy: never  # use the locally-built hardened image, never refetch
+    ports:
+      - "${HOST_PORT:-3000}:3000"
+    environment:
+      # Tell the orchestrator which sandbox image to spawn for new
+      # conversations. Points at our hardened agent-server, not upstream.
+      AGENT_SERVER_IMAGE_REPOSITORY: ${AGENT_SERVER_OUT_IMAGE:-agent-server}
+      AGENT_SERVER_IMAGE_TAG: ${AGENT_SERVER_OUT_TAG:-custom_base}
+      # Sandbox URL used by the orchestrator to reach spawned containers.
+      SANDBOX_LOCAL_RUNTIME_URL: http://host.docker.internal
+      WORKSPACE_MOUNT_PATH: ${WORKSPACE_BASE:-./workspace}
+      # Runtime knobs / secrets (set in .env, never inline):
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_MODEL:   ${LLM_MODEL:-}
+      LLM_BASE_URL: ${LLM_BASE_URL:-}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      # Required so the orchestrator can spawn sandbox containers.
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Persistent app state (conversations, settings).
+      - ~/.openhands:/.openhands
+      # Workspace mount made visible to spawned sandboxes.
+      - ${WORKSPACE_BASE:-./workspace}:/opt/workspace_base
+    stdin_open: true
+    tty: true
+    restart: unless-stopped

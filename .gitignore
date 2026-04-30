@@ -1,0 +1,32 @@
+# --- secrets / runtime config -----------------------------------------------
+.env
+.env.*
+!.env.example
+*.local
+
+# --- build / scan artifacts -------------------------------------------------
+reports/*
+!reports/.gitkeep
+logs/
+*.log
+*.bak
+*.bak.*
+.scout-cache/
+
+# --- workspaces / volumes ---------------------------------------------------
+workspace/
+data/
+.openhands/
+
+# --- editor / OS noise ------------------------------------------------------
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~
+
+# --- node / python (in case a contributor adds tooling later) ---------------
+node_modules/
+__pycache__/
+*.pyc
+.venv/

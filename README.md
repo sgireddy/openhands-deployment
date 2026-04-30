@@ -1,0 +1,166 @@
+# openhands-deployment
+
+A small, opinionated downstream deployment repo for [OpenHands](https://github.com/All-Hands-AI/OpenHands)
+and the [agent-server](https://github.com/OpenHands/software-agent-sdk). It does
+**not** contain any OpenHands source code — it pulls the published upstream
+images, applies a thin **security hardening overlay** (OS package upgrades and
+optional pinned Python upgrades), and tags the result locally for use.
+
+> **Disclaimer.** This repository is an unofficial, third-party deployment
+> wrapper. It is not affiliated with or endorsed by All-Hands AI. The
+> upstream images it consumes are governed by their own licenses.
+
+## Why
+
+Upstream images can ship with known CVEs in their base OS packages or pinned
+Python deps. Two common (and unsatisfying) responses:
+
+1. Wait for upstream to cut a new release. Slow.
+2. Fork the upstream Dockerfile. Endless merge conflicts.
+
+This repo takes a third route: **never edit upstream**. We pull whatever
+upstream publishes, layer security patches on top via two small `Dockerfile`s,
+and verify the result with [Docker Scout](https://docs.docker.com/scout/).
+
+```
+upstream image  ──►  overlay (apt-get upgrade, optional pip pins)  ──►  hardened image
+                                                                        │
+                                                                        ▼
+                                                          docker compose up -d
+```
+
+## What's in here
+
+```
+.
+├── README.md
+├── LICENSE                      # MIT
+├── .env.example                 # template for runtime config
+├── .gitignore                   # excludes .env, reports/, logs, .DS_Store, etc.
+├── compose/
+│   └── docker-compose.yml       # consumes the *hardened* images, not upstream
+├── overlays/
+│   ├── Dockerfile.openhands     # FROM ${BASE_IMAGE}; apt upgrade; optional pip
+│   └── Dockerfile.agent-server  # same shape, for sandbox runtime image
+└── scripts/
+    ├── lib.sh                   # shared helpers
+    ├── build.sh                 # pull → scan → overlay → scan → policy gate
+    ├── verify.sh                # scan-only mode
+    └── update.sh                # find newer upstream tags, optionally rebuild
+```
+
+## Prerequisites
+
+- Docker Desktop (or Docker Engine ≥ 24.x) with **Docker Scout** available
+  (`docker scout version`).
+- macOS, Linux, or WSL2.
+- A working `docker login` for any private upstream registries you point at
+  (the defaults — Docker Hub for OpenHands, GHCR public for agent-server —
+  do **not** require credentials for read).
+
+## Quick start
+
+```bash
+git clone https://github.com/sgireddy/openhands-deployment.git
+cd openhands-deployment
+
+# 1. Pick image tags + runtime config
+cp .env.example .env
+$EDITOR .env                          # set LLM_API_KEY etc.
+
+# 2. Build & verify the hardened images
+./scripts/build.sh
+
+# 3. Run
+docker compose -f compose/docker-compose.yml --env-file .env up -d
+# → http://localhost:3000
+```
+
+`build.sh` exits non-zero if the post-overlay image still violates policy
+(`POLICY_MAX_CRITICAL` from `.env`, default `0`). Reports for each run land
+under `reports/<UTC-timestamp>/` (gitignored).
+
+## Configuration
+
+All knobs live in `.env`. Defaults are visible in `.env.example`.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `OPENHANDS_BASE_IMAGE`        | `docker.all-hands.dev/all-hands-ai/openhands` | Upstream OpenHands repo |
+| `OPENHANDS_BASE_TAG`          | `latest`                                       | Upstream tag to pull |
+| `AGENT_SERVER_BASE_IMAGE`     | `ghcr.io/openhands/agent-server`               | Upstream agent-server repo |
+| `AGENT_SERVER_BASE_TAG`       | `1.19.0-python`                                | Upstream tag to pull |
+| `OPENHANDS_OUT_IMAGE/TAG`     | `openhands:custom_base`                        | Locally-built hardened image |
+| `AGENT_SERVER_OUT_IMAGE/TAG`  | `agent-server:custom_base`                     | Locally-built hardened image |
+| `HOST_PORT`                   | `3000`                                         | Host port for the web UI |
+| `WORKSPACE_BASE`              | `./workspace`                                  | Mounted into the orchestrator and sandboxes |
+| `POLICY_MAX_CRITICAL`         | `0`                                            | Max allowed CRITICAL CVEs after overlay |
+| `POLICY_MAX_HIGH`             | *(unbounded)*                                  | Max allowed HIGH CVEs (empty = no limit) |
+| `PIP_UPGRADES_OPENHANDS`      | *(empty)*                                      | Whitespace-separated pip specs to upgrade in the overlay |
+| `PIP_UPGRADES_AGENT_SERVER`   | *(empty)*                                      | Same, for agent-server |
+| `LLM_API_KEY`, `LLM_MODEL`, `LLM_BASE_URL` | *(empty)*                         | Read by the orchestrator at runtime |
+
+## Common workflows
+
+### Rebuild only one image
+```bash
+./scripts/build.sh openhands
+./scripts/build.sh agent-server
+```
+
+### Scan only, no build
+```bash
+./scripts/verify.sh                     # the hardened images
+./scripts/verify.sh --upstream          # the raw upstream images
+```
+
+### Upgrade specific Python packages in the overlay
+Set in `.env`:
+```bash
+PIP_UPGRADES_AGENT_SERVER="urllib3==2.5.0 cryptography==45.0.0"
+```
+Then `./scripts/build.sh agent-server`.
+
+### Bump to newer upstream tags
+```bash
+./scripts/update.sh                     # list newer tags (read-only)
+./scripts/update.sh --apply             # bump .env and rebuild
+```
+
+### Check what changed between baseline and hardened
+```bash
+ls reports/                             # latest run is at the bottom
+diff -u reports/<latest>/openhands-01-baseline-quickview.txt \
+        reports/<latest>/openhands-02-post-overlay-quickview.txt
+```
+
+## Security notes
+
+- `.env` is gitignored. Never commit secrets.
+- `reports/` is gitignored. Scout output for *public* images is itself public
+  info, but keeping it out of git avoids accidental leakage if you later
+  point the overlays at a private registry.
+- The overlays themselves contain no credentials and produce no auth state.
+- Use SSH (`git@github.com:...`) or `credential.helper=osxkeychain` for the
+  `origin` remote — never put a token in the URL.
+
+## Limitations
+
+- An overlay can only fix CVEs whose patches are available in **package
+  metadata** (apt or pip). If a CVE lives in an old binary not managed by
+  apt/pip (e.g. a bundled chromium), the overlay cannot patch it; bumping
+  the upstream tag is the only fix. Use `update.sh` to discover those bumps.
+- Image size grows by one layer per overlay. Periodically re-baseline by
+  bumping to a newer upstream tag — the `update.sh` script automates this.
+- Scout's auto-detected base image may not exactly match the upstream tag
+  (it picks the closest published digest). For deterministic provenance,
+  build upstream with `--provenance=mode=max`.
+
+## Contributing
+
+PRs welcome. Keep the overlays minimal — anything that requires source-level
+changes belongs in the upstream OpenHands or software-agent-sdk repo.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
