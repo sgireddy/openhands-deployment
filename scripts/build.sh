@@ -57,7 +57,12 @@ export ASSUME_YES
 load_env
 require_tools
 
-RUN_DIR="$REPO_ROOT/reports/$(date -u +%Y%m%dT%H%M%SZ)"
+# Reports default to OUTSIDE the repo so build artifacts can never accidentally
+# be staged or pushed. Override with REPORTS_DIR=. or anywhere else if you
+# want them somewhere specific. The repo's .gitignore still excludes a
+# stray reports/ directory as a belt-and-braces backstop.
+REPORTS_DIR="${REPORTS_DIR:-$HOME/openhands-deployment/reports}"
+RUN_DIR="$REPORTS_DIR/$(date -u +%Y%m%dT%H%M%SZ)"
 mkdir -p "$RUN_DIR"
 log "Reports → $RUN_DIR"
 

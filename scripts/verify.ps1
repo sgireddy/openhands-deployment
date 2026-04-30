@@ -67,7 +67,13 @@ if ($CheckPin) {
 Test-Tools
 Show-DriftBanner
 
-$RunDir = Join-Path $RepoRoot ("reports/verify-{0}" -f (Get-Date -Format 'yyyyMMddTHHmmssZ' -AsUTC))
+# See note in build.ps1 about why REPORTS_DIR defaults outside the repo.
+$reportsRoot = if ($env:REPORTS_DIR) {
+    $env:REPORTS_DIR
+} else {
+    Join-Path $HOME 'openhands-deployment/reports'
+}
+$RunDir = Join-Path $reportsRoot ("verify-{0}" -f (Get-Date -Format 'yyyyMMddTHHmmssZ' -AsUTC))
 New-Item -ItemType Directory -Force -Path $RunDir | Out-Null
 
 function Resolve-Image {

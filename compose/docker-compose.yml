@@ -27,7 +27,7 @@ services:
       AGENT_SERVER_IMAGE_TAG: ${AGENT_SERVER_OUT_TAG:-custom_base}
       # Sandbox URL used by the orchestrator to reach spawned containers.
       SANDBOX_LOCAL_RUNTIME_URL: http://host.docker.internal
-      WORKSPACE_MOUNT_PATH: ${WORKSPACE_BASE:-./workspace}
+      WORKSPACE_MOUNT_PATH: ${WORKSPACE_BASE:-${HOME}/openhands-deployment/workspace}
       # Runtime knobs / secrets (set in .env, never inline):
       LLM_API_KEY: ${LLM_API_KEY:-}
       LLM_MODEL:   ${LLM_MODEL:-}
@@ -40,7 +40,10 @@ services:
       # Persistent app state (conversations, settings).
       - ~/.openhands:/.openhands
       # Workspace mount made visible to spawned sandboxes.
-      - ${WORKSPACE_BASE:-./workspace}:/opt/workspace_base
+      # Defaults to OUTSIDE the repo so agent-generated files (downloaded
+      # artifacts, generated code, anything the user pastes) can never
+      # accidentally end up staged. Override via WORKSPACE_BASE in .env.
+      - ${WORKSPACE_BASE:-${HOME}/openhands-deployment/workspace}:/opt/workspace_base
     stdin_open: true
     tty: true
     restart: unless-stopped

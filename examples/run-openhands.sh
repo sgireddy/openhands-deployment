@@ -17,6 +17,11 @@
 #                          (default: agent-server)
 #   AGENT_SERVER_TAG     — tag of the hardened agent-server image
 #                          (default: custom_base — matches build.sh output)
+#   DEPLOY_HOME          — parent dir for all runtime state and logs
+#                          (default: $HOME/openhands-deployment)
+#                          Sub-paths created beneath it:
+#                            $DEPLOY_HOME/data/{state,workspace,.openhands}
+#                            $DEPLOY_HOME/openhands.log
 #
 # Positional args:
 #   $1 — host port to bind the UI on (default: 3000)
@@ -29,8 +34,11 @@
 #     for each conversation. Don't run this on a machine where the
 #     openhands process is not trusted with full docker access.
 #
-# ⚠️  Logging note: LOG_LEVEL=DEBUG can record prompt/response payloads.
-#     The log file lives next to this script. Treat it as sensitive.
+# ⚠️  Logging note: LOG_LEVEL=DEBUG can record prompt/response payloads
+#     and may incidentally capture API keys or other secrets. The log
+#     file lives at $DEPLOY_HOME/openhands.log — outside the repo by
+#     default, so it can never accidentally be staged. Treat it as
+#     sensitive regardless of where it lands.
 
 # ----- configuration --------------------------------------------------------
 PORT=${1:-3000}
@@ -51,8 +59,14 @@ AGENT_SERVER_REPO="${AGENT_SERVER_REPO:-agent-server}"
 AGENT_SERVER_TAG="${AGENT_SERVER_TAG:-custom_base}"
 
 SCRIPT_DIR="${0:a:h}"
-DATA_DIR="$HOME/openhands-data"
-LOG_FILE="$HOME/openhands.log"
+# Runtime state lives OUTSIDE the repo. Consolidated under one parent
+# ($HOME/openhands-deployment/) alongside reports/ and workspace/ so the
+# whole local footprint is in one place and zero of it can leak into a
+# git commit. The repo's .gitignore is still defensive in case someone
+# overrides these back inside the tree.
+DEPLOY_HOME="${DEPLOY_HOME:-$HOME/openhands-deployment}"
+DATA_DIR="$DEPLOY_HOME/data"
+LOG_FILE="$DEPLOY_HOME/openhands.log"
 
 # ----- pre-flight -----------------------------------------------------------
 if [[ -z "$OH_SECRET_KEY" ]]; then
@@ -70,6 +84,7 @@ for img in "$IMAGE" "${AGENT_SERVER_REPO}:${AGENT_SERVER_TAG}"; do
 done
 
 # ----- setup ----------------------------------------------------------------
+mkdir -p "$DEPLOY_HOME"
 mkdir -p "$DATA_DIR"/{state,workspace,.openhands}
 docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1
 pkill -f "docker logs -f $CONTAINER_NAME" >/dev/null 2>&1
