@@ -9,10 +9,14 @@
 #   ./scripts/verify.sh --upstream         # scan upstream images instead
 #   ./scripts/verify.sh openhands          # one component
 #   ./scripts/verify.sh agent-server       # one component
+#   ./scripts/verify.sh --check-pin        # NO scan; just check pin drift
+#                                            against latest stable SDK release
 #
 # Exit codes:
-#   0 = within policy or only a UNKNOWN result
+#   0 = within policy / pin in sync
+#   1 = pin drift detected (--check-pin only)
 #   2 = policy violation
+#   3 = drift check could not reach GitHub (--check-pin only)
 
 set -Eeuo pipefail
 
@@ -22,11 +26,13 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 COMPONENTS=()
 SCAN_TARGET=hardened
+CHECK_PIN_ONLY=0
 while (( $# )); do
     case "$1" in
         openhands|agent-server) COMPONENTS+=("$1"); shift ;;
         --upstream)             SCAN_TARGET=upstream; shift ;;
         --hardened)             SCAN_TARGET=hardened; shift ;;
+        --check-pin)            CHECK_PIN_ONLY=1; shift ;;
         -h|--help)
             awk 'NR>1 && /^#/ {sub(/^# ?/,""); print; next} {exit}' "$0"
             exit 0 ;;
@@ -36,7 +42,25 @@ done
 (( ${#COMPONENTS[@]} == 0 )) && COMPONENTS=(openhands agent-server)
 
 load_env
+
+# --check-pin is a fast, no-Docker drift check. Useful for cron / CI.
+if (( CHECK_PIN_ONLY )); then
+    drift="$(agent_server_drift)"
+    case "$drift" in
+        IN_SYNC)
+            ok "agent-server pin in sync with latest stable (${AGENT_SERVER_BASE_TAG})"
+            exit 0 ;;
+        DRIFT:*)
+            err "agent-server pin DRIFT: current=${AGENT_SERVER_BASE_TAG}  latest-stable=${drift#DRIFT:}"
+            exit 1 ;;
+        UNKNOWN)
+            warn "could not reach github.com to check drift"
+            exit 3 ;;
+    esac
+fi
+
 require_tools
+report_drift
 
 RUN_DIR="$REPO_ROOT/reports/verify-$(date -u +%Y%m%dT%H%M%SZ)"
 mkdir -p "$RUN_DIR"

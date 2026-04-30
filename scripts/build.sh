@@ -61,6 +61,10 @@ RUN_DIR="$REPO_ROOT/reports/$(date -u +%Y%m%dT%H%M%SZ)"
 mkdir -p "$RUN_DIR"
 log "Reports → $RUN_DIR"
 
+# Surface drift before doing real work — not a build blocker, but the
+# operator should know if their pin is behind the latest stable SDK.
+report_drift
+
 # --- per-component build function ------------------------------------------
 # Returns:
 #   0  success and within policy

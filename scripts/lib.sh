@@ -23,6 +23,60 @@ confirm() {
     [[ "$ans" =~ ^[Yy]$ ]]
 }
 
+# --- agent-server pin drift -------------------------------------------------
+# Policy: pin should track the latest stable software-agent-sdk release.
+# Deviation is acceptable only when justified (e.g., a critical CVE in the
+# latest stable forces a hold or a jump to a non-stable hotfix).
+#
+# This helper queries the SDK GitHub releases API for the latest *stable*
+# release (the /releases/latest endpoint already excludes prereleases and
+# drafts) and compares it to AGENT_SERVER_BASE_TAG. It prints one of three
+# tokens to stdout, suitable for capture:
+#   IN_SYNC      — pin matches latest stable
+#   DRIFT:<tag>  — pin is behind; <tag> is what latest stable maps to
+#   UNKNOWN      — couldn't reach GitHub (offline, rate-limited, etc.)
+#
+# Diagnostics go to stderr via warn/log so callers can show or hide them.
+agent_server_drift() {
+    local hdr_args=()
+    [[ -n "${GITHUB_TOKEN:-}" ]] && hdr_args=(-H "Authorization: Bearer $GITHUB_TOKEN")
+    local sdk_tag
+    sdk_tag="$(curl -fsSL --max-time 5 "${hdr_args[@]}" \
+        -H "Accept: application/vnd.github+json" \
+        "https://api.github.com/repos/OpenHands/software-agent-sdk/releases/latest" 2>/dev/null \
+        | python3 -c 'import json,sys
+try: print(json.load(sys.stdin).get("tag_name",""))
+except Exception: pass' 2>/dev/null)"
+    if [[ -z "$sdk_tag" ]]; then
+        echo "UNKNOWN"
+        return 0
+    fi
+    local expected="${sdk_tag#v}-python"
+    if [[ "$expected" == "${AGENT_SERVER_BASE_TAG:-}" ]]; then
+        echo "IN_SYNC"
+    else
+        echo "DRIFT:$expected"
+    fi
+}
+
+# Print a one-line drift summary suitable for build.sh / verify.sh banners.
+# Always returns 0 — drift is informational, not a failure mode.
+report_drift() {
+    local drift; drift="$(agent_server_drift)"
+    case "$drift" in
+        IN_SYNC)
+            ok "agent-server pin is on latest stable (${AGENT_SERVER_BASE_TAG})" ;;
+        DRIFT:*)
+            local newer="${drift#DRIFT:}"
+            warn "agent-server pin DRIFT: current=${AGENT_SERVER_BASE_TAG}  latest-stable=${newer}"
+            warn "  policy: track latest stable. Bump unless a known regression justifies holding."
+            warn "  to update: ./scripts/update.sh --apply" ;;
+        UNKNOWN)
+            warn "could not reach github.com to check pin drift (offline / rate-limited?)" ;;
+    esac
+    return 0
+}
+
 # --- env loading ------------------------------------------------------------
 # Loads .env from REPO_ROOT, then applies defaults for any unset variable so
 # scripts work even with no .env at all.

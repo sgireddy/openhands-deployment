@@ -91,19 +91,52 @@ tag `X.Y.Z-python`. No login required:
 docker pull ghcr.io/openhands/agent-server:1.19.0-python
 ```
 
-The default in `.env.example` is intentionally pinned, not floating, so
-that `./scripts/build.sh` produces a deterministic `:custom_base`. To find
-out whether you're behind:
+### Versioning policy
+
+> **Track the latest stable SDK release.** Deviate only when justified —
+> e.g., when a critical CVE in the latest stable forces you to hold or
+> jump to a non-stable hotfix.
+
+The default in `.env.example` is pinned (not floating) so that
+`./scripts/build.sh` produces a deterministic `:custom_base`. The pin
+should still be kept current; that's what `update.sh` and the drift
+warnings exist for.
 
 ```bash
-./scripts/update.sh                # read-only; queries the SDK release feed
-./scripts/update.sh --apply        # bumps .env and reruns build.sh
+./scripts/verify.sh --check-pin    # exit 0 in sync, 1 drift, 3 offline
+                                   # — fast, no Docker, suitable for cron
+./scripts/update.sh                # informational: print current vs newest
+./scripts/update.sh --apply        # bump AGENT_SERVER_BASE_TAG and rebuild
 ```
 
-`update.sh` uses the `software-agent-sdk` GitHub releases API as the
-authoritative source (the GHCR tag list paginates ~20k commit-SHA tags
-which is impractical to enumerate), then verifies the matching
-`X.Y.Z-python` exists on GHCR before bumping.
+`build.sh` and `verify.sh` print a one-line drift banner at the top of
+every run. It's never a build blocker, just visibility:
+
+```
+[ OK ] agent-server pin is on latest stable (1.19.0-python)
+# or
+[WARN] agent-server pin DRIFT: current=1.18.1-python  latest-stable=1.19.0-python
+[WARN]   policy: track latest stable. Bump unless a known regression justifies holding.
+[WARN]   to update: ./scripts/update.sh --apply
+```
+
+Discovery uses the `software-agent-sdk` [GitHub releases API](https://api.github.com/repos/OpenHands/software-agent-sdk/releases/latest)
+as the authoritative source — that endpoint already excludes prereleases
+and drafts, so we only ever propose stable bumps. The GHCR tags/list
+endpoint isn't usable for this (~20k commit-SHA tags drown out semver).
+
+### Automation (optional)
+
+Pick whatever fits your environment:
+
+| Mechanism | Setup | Cost |
+|---|---|---|
+| **Mac local cron** | `crontab -e`, add weekly call to `verify.sh --check-pin`, pipe to `osascript` for a notification or to email | $0, runs only on your laptop |
+| **GitHub Actions** | Add a weekly `schedule:` workflow that runs `--check-pin` and opens a PR if drift > 0 | $0 — Actions is **free with no minute cap on public repos** ([docs](https://docs.github.com/en/billing/managing-billing-for-your-products/managing-billing-for-github-actions/about-billing-for-github-actions)) |
+| **Manual** | Run `./scripts/update.sh` whenever you remember | $0 |
+
+A reference Actions workflow can be added later if wanted; not included
+by default to keep the repo dependency-free.
 
 ## Quick start
 
