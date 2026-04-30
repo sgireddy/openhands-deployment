@@ -361,11 +361,79 @@ $env:OH_SECRET_KEY = (python -c "import secrets;print(secrets.token_hex(32))")
 Both ports write runtime state to `$DEPLOY_HOME` (default
 `$HOME/openhands-deployment` — same parent dir the compose flow uses for
 `workspace/` and `reports/`), and detach a `docker logs -f` tailer that
-appends to `openhands.log` (the PowerShell port additionally splits
-stderr into `openhands.err.log` because `Start-Process` cannot redirect
+appends to `<instance>.log` (the PowerShell port additionally splits
+stderr into `<instance>.err.log` because `Start-Process` cannot redirect
 both streams to the same file). The tailer's PID is recorded at
-`$DEPLOY_HOME/log-tailer.pid` so the next run cleans it up before
-launching a fresh one.
+`<instance>.pid` so the next run of *that same instance* cleans it up
+before launching a fresh one — without touching other running
+instances.
+
+#### Multiple simultaneous instances
+
+Every per-instance bit of state — container name, data dir, log file,
+pidfile — derives from `INSTANCE_NAME` (default: `openhands-<port>`).
+That means two invocations on different ports stay fully isolated:
+
+```bash
+# Terminal A — Claude on port 3010
+./examples/run-openhands.sh 3010 'anthropic/claude-sonnet-4-5'
+
+# Terminal B — GPT-5 on port 3020 (no flags collide, no state collides)
+./examples/run-openhands.sh 3020 'openai/gpt-5'
+```
+
+```powershell
+# Terminal A — Claude on port 3010
+.\examples\run-openhands.ps1 -Port 3010 -Model 'anthropic/claude-sonnet-4-5'
+
+# Terminal B — GPT-5 on port 3020
+.\examples\run-openhands.ps1 -Port 3020 -Model 'openai/gpt-5'
+```
+
+You'll end up with:
+
+| Container       | UI                       | Data dir                                           | Log file                                   |
+|-----------------|--------------------------|----------------------------------------------------|--------------------------------------------|
+| `openhands-3010`| <http://localhost:3010>  | `$DEPLOY_HOME/openhands-3010/{state,workspace,.openhands}` | `$DEPLOY_HOME/openhands-3010.log`  |
+| `openhands-3020`| <http://localhost:3020>  | `$DEPLOY_HOME/openhands-3020/{state,workspace,.openhands}` | `$DEPLOY_HOME/openhands-3020.log`  |
+
+Each instance has its own conversation DB and settings store, so
+they don't interfere. List them all at any time:
+
+```bash
+docker ps --filter name=openhands- --format 'table {{.Names}}\t{{.Ports}}\t{{.Status}}'
+```
+
+Stop one without affecting the other:
+
+```bash
+docker rm -f openhands-3010
+kill "$(cat "$HOME/openhands-deployment/openhands-3010.pid")"
+```
+
+You can also override the name explicitly (handy when port numbers
+aren't memorable):
+
+```bash
+INSTANCE_NAME=claude-prod ./examples/run-openhands.sh 3010 'anthropic/claude-sonnet-4-5'
+```
+
+```powershell
+.\examples\run-openhands.ps1 -Port 3010 -InstanceName 'claude-prod' -Model 'anthropic/claude-sonnet-4-5'
+```
+
+> **Migration note**: earlier versions of these scripts hardcoded the
+> container as `openhands` and the data dir as `$DEPLOY_HOME/data/`.
+> If you have conversation history under that path and want to keep it,
+> rename the directory once before the next run:
+>
+> ```bash
+> mv "$HOME/openhands-deployment/data" "$HOME/openhands-deployment/openhands-3000"
+> ```
+>
+> ```powershell
+> Rename-Item "$HOME\openhands-deployment\data" "$HOME\openhands-deployment\openhands-3000"
+> ```
 
 ## Local on-disk layout
 
@@ -377,10 +445,20 @@ a single parent under your home directory:
 $HOME/openhands-deployment/
 ├── reports/<UTC-timestamp>/    # build.sh / verify.sh scout output
 ├── workspace/                  # WORKSPACE_BASE for compose (sandbox files)
-├── data/                       # examples/run-openhands.{sh,ps1} container state
-├── openhands.log               # examples/run-openhands.{sh,ps1} container stdout
-└── openhands.err.log           # examples/run-openhands.ps1 container stderr (Windows only)
+├── <instance>/                 # examples/run-openhands.{sh,ps1} container state
+│   ├── state/                  #   conversation DB + agent state
+│   ├── workspace/              #   per-instance file workspace
+│   └── .openhands/             #   settings, secrets, mcp config
+├── <instance>.log              # examples/run-openhands.{sh,ps1} container stdout
+├── <instance>.err.log          # examples/run-openhands.ps1 container stderr (Windows only)
+└── <instance>.pid              # examples/run-openhands.{sh,ps1} log-tailer PID
 ```
+
+…where `<instance>` defaults to `openhands-<port>` (e.g.
+`openhands-3000`), so a typical single-instance install on port 3000
+has `openhands-3000/`, `openhands-3000.log`, etc. Run two scripts on
+different ports and you get two parallel sets — see *Multiple
+simultaneous instances* above.
 
 This is intentional defense-in-depth:
 
@@ -399,7 +477,8 @@ Override env vars (any subset):
 |---|---|---|
 | `REPORTS_DIR` | `$HOME/openhands-deployment/reports` | `scripts/build.{sh,ps1}`, `scripts/verify.{sh,ps1}` |
 | `WORKSPACE_BASE` | `$HOME/openhands-deployment/workspace` | `compose/docker-compose.yml` |
-| `DEPLOY_HOME` | `$HOME/openhands-deployment` | `examples/run-openhands.{sh,ps1}` (groups `data/` and the log files under one parent). On the PowerShell port the same effect is also achievable via the `-DeployHome` parameter. |
+| `DEPLOY_HOME` | `$HOME/openhands-deployment` | `examples/run-openhands.{sh,ps1}` (groups all `<instance>/` data dirs, log files, and pidfiles under one parent). On the PowerShell port the same effect is also achievable via the `-DeployHome` parameter. |
+| `INSTANCE_NAME` | `openhands-<port>` | `examples/run-openhands.{sh,ps1}` (scopes container name + every per-instance bit of state, so two parallel runs on different ports stay isolated). On the PowerShell port: `-InstanceName`. |
 
 ## Configuration
 

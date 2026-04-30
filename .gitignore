@@ -26,6 +26,10 @@ logs/
 workspace/
 data/
 .openhands/
+# Per-instance data dirs / pidfiles created by examples/run-openhands.{sh,ps1}
+# when DEPLOY_HOME is overridden to point inside the tree.
+openhands-*/
+openhands-*.pid
 
 # --- legacy in-repo paths (pre-default-relocation; kept defensively) -------
 examples/openhands-data/
