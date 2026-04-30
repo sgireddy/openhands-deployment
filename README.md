@@ -42,11 +42,15 @@ upstream image  ──►  overlay (apt-get upgrade, optional pip pins)  ──�
 ├── overlays/
 │   ├── Dockerfile.openhands     # FROM ${BASE_IMAGE}; apt upgrade; optional pip
 │   └── Dockerfile.agent-server  # same shape, for sandbox runtime image
-└── scripts/
-    ├── lib.sh / lib.ps1         # shared helpers (bash / PowerShell)
-    ├── build.sh / build.ps1     # scan → overlay → scan → policy gate
-    ├── verify.sh / verify.ps1   # scan-only mode + --check-pin
-    └── update.sh / update.ps1   # find newer SDK release, optionally rebuild
+├── scripts/
+│   ├── lib.sh / lib.ps1         # shared helpers (bash / PowerShell)
+│   ├── build.sh / build.ps1     # scan → overlay → scan → policy gate
+│   ├── verify.sh / verify.ps1   # scan-only mode + --check-pin
+│   └── update.sh / update.ps1   # find newer SDK release, optionally rebuild
+└── examples/
+    └── run-openhands.sh         # reference invocation that wires the
+                                 # hardened openhands + agent-server images
+                                 # together via AGENT_SERVER_IMAGE_REPOSITORY/TAG
 ```
 
 The **bash** scripts (`*.sh`) and **PowerShell** scripts (`*.ps1`) are
