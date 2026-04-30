@@ -51,8 +51,8 @@ AGENT_SERVER_REPO="${AGENT_SERVER_REPO:-agent-server}"
 AGENT_SERVER_TAG="${AGENT_SERVER_TAG:-custom_base}"
 
 SCRIPT_DIR="${0:a:h}"
-DATA_DIR="$SCRIPT_DIR/openhands-data"
-LOG_FILE="$SCRIPT_DIR/openhands.log"
+DATA_DIR="$HOME/openhands-data"
+LOG_FILE="$HOME/openhands.log"
 
 # ----- pre-flight -----------------------------------------------------------
 if [[ -z "$OH_SECRET_KEY" ]]; then
