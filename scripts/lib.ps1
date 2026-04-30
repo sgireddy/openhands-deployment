@@ -91,7 +91,14 @@ function global:Test-Tools {
 
 # --- scout scan -------------------------------------------------------------
 # Runs three reports for an image and writes them under $RunDir with a
-# common prefix. Returns 0 on success, throws on failure.
+# common prefix.
+#
+# We disable scout's color codes by setting NO_COLOR=1 for the child process —
+# without this, scout writes ANSI escapes when it detects a TTY and
+# Get-ScoutCounts can't parse the line. (Bash version doesn't hit this
+# because we redirect stdout to a file there, which scout treats as not-a-TTY
+# automatically. PowerShell's pipeline keeps the parent's TTY context, so we
+# have to be explicit.)
 function global:Invoke-ScoutScan {
     param(
         [Parameter(Mandatory)] [string]$Image,
@@ -103,21 +110,58 @@ function global:Invoke-ScoutScan {
     $ch  = Join-Path $RunDir ("{0}-cves-critical-high.txt" -f $Prefix)
     $pkg = Join-Path $RunDir ("{0}-pkgs-critical-high.txt" -f $Prefix)
 
-    & docker scout quickview $Image 2>&1 | Tee-Object -FilePath $qv  | Out-Null
-    & docker scout cves      --only-severity critical,high $Image 2>&1 | Tee-Object -FilePath $ch  | Out-Null
-    & docker scout cves      --format only-packages --only-severity critical,high $Image 2>&1 | Tee-Object -FilePath $pkg | Out-Null
+    $prevNoColor = $env:NO_COLOR
+    $env:NO_COLOR = '1'
+    try {
+        # Capture as strings, then write file as UTF-8. Avoid Tee-Object's
+        # platform-dependent default encoding entirely.
+        $out = & docker scout quickview $Image 2>&1 | Out-String
+        Set-Content -LiteralPath $qv  -Value $out -Encoding utf8
+
+        $out = & docker scout cves --only-severity critical,high $Image 2>&1 | Out-String
+        Set-Content -LiteralPath $ch  -Value $out -Encoding utf8
+
+        $out = & docker scout cves --format only-packages --only-severity critical,high $Image 2>&1 | Out-String
+        Set-Content -LiteralPath $pkg -Value $out -Encoding utf8
+    } finally {
+        $env:NO_COLOR = $prevNoColor
+    }
 
     Log-Info ("Saved: {0}/{1}-{{quickview,cves-critical-high,pkgs-critical-high}}.txt" -f $RunDir, $Prefix)
 }
 
-# Returns "<crit>:<high>" parsed from a quickview file.
+# Strip ANSI/CSI/OSC escape sequences. Belt and braces in case scout
+# (or some future plugin) ignores NO_COLOR and writes colors anyway.
+function global:Remove-AnsiEscapes {
+    param([string]$Text)
+    if (-not $Text) { return '' }
+    # CSI: ESC[ ... letter        OSC: ESC] ... BEL/ST       2-byte ESC X
+    $pattern = "(`e\[[0-9;?]*[ -/]*[@-~])|(`e\][^`a]*(`a|`e\\))|(`e[@-Z\\-_])"
+    return [regex]::Replace($Text, $pattern, '')
+}
+
+# Parse a quickview file into "<crit>:<high>". Token-walking matches the
+# bash version's awk: scan whitespace-separated fields for an "<N>C" token
+# immediately followed by an "<N>H" token. This is robust to format drift
+# (different separators, padding, ANSI residue, codepage substitutions for
+# the box-drawing pipe, etc.).
 function global:Get-ScoutCounts {
     param([Parameter(Mandatory)] [string]$QuickviewPath)
     if (-not (Test-Path -LiteralPath $QuickviewPath)) { return '?:?' }
-    $content = Get-Content -LiteralPath $QuickviewPath -Raw
-    # quickview prints lines like "Target │ X │ 1C 17H 24M 67L"
-    $m = [regex]::Match($content, '(?m)^\s*Target\s+│.*│\s*(\d+)C\s+(\d+)H')
-    if ($m.Success) { return ('{0}:{1}' -f $m.Groups[1].Value, $m.Groups[2].Value) }
+    $clean = Remove-AnsiEscapes (Get-Content -LiteralPath $QuickviewPath -Raw)
+    foreach ($line in ($clean -split "`r?`n")) {
+        if ($line -notmatch 'Target') { continue }
+        # Replace any non-alphanumeric run with a single space so "│" / "|"
+        # / multiple spaces collapse cleanly, then split.
+        $tokens = ($line -replace '[^A-Za-z0-9:.\-/]+',' ').Trim() -split '\s+'
+        for ($i = 0; $i -lt $tokens.Length - 1; $i++) {
+            if ($tokens[$i] -match '^([0-9]+)C$' -and $tokens[$i+1] -match '^([0-9]+)H$') {
+                $c = ($tokens[$i]   -replace 'C$','')
+                $h = ($tokens[$i+1] -replace 'H$','')
+                return ('{0}:{1}' -f $c, $h)
+            }
+        }
+    }
     return '?:?'
 }
 

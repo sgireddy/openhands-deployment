@@ -60,7 +60,17 @@ Log-Info ("Reports -> {0}" -f $RunDir)
 # Banner: surface drift before doing real work.
 Show-DriftBanner
 
+# IMPORTANT: PowerShell function return semantics.
+# Every uncaptured expression inside a function (including stdout from any
+# `& native.exe ...` call) is sent to the success stream and becomes part
+# of the function's return value. To return a single int and nothing else
+# we must:
+#   - Pipe external commands to `Out-Host`        (show user, don't capture)
+#     or `Out-Null`                                (suppress entirely)
+#     or assign to a variable                     (capture, don't emit)
+#   - Use `[OutputType([int])]` for self-doc + linting.
 function Invoke-ComponentBuild {
+    [OutputType([int])]
     param(
         [Parameter(Mandatory)]
         [ValidateSet('openhands','agent-server')]
@@ -90,9 +100,10 @@ function Invoke-ComponentBuild {
 
     Log-Hdr ("[{0}] upstream={1}  ->  hardened={2}" -f $Comp, $upstream, $hardened)
 
-    # 1. require upstream cached
+    # 1. require upstream cached. *> $null swallows all streams.
     & docker image inspect $upstream *> $null
-    if ($LASTEXITCODE -ne 0) {
+    $rc = $LASTEXITCODE
+    if ($rc -ne 0) {
         Log-Err ("[{0}] upstream image not found locally: {1}" -f $Comp, $upstream)
         Log-Err  '  This script does not pull upstream images. Obtain it first, e.g.:'
         if ($Comp -eq 'openhands') {
@@ -100,7 +111,7 @@ function Invoke-ComponentBuild {
         } else {
             Log-Err ("    docker pull {0}" -f $upstream)
         }
-        return 1
+        return [int]1
     }
     Log-Ok ("[{0}] upstream cached: {1}" -f $Comp, $upstream)
 
@@ -110,7 +121,8 @@ function Invoke-ComponentBuild {
     $bCrit, $bHigh = $bCounts -split ':'
     Log-Info ("[{0}] baseline           : {1}C / {2}H" -f $Comp, $bCrit, $bHigh)
 
-    # 3. overlay build
+    # 3. overlay build. Pipe to Out-Host so the user sees streaming output,
+    # WITHOUT it leaking into our function's return value.
     Log-Hdr ("[{0}] building overlay -> {1}" -f $Comp, $hardened)
     & docker build `
         -f $dockerfile `
@@ -118,10 +130,11 @@ function Invoke-ComponentBuild {
         --build-arg "PIP_UPGRADES=$pipUpgrades" `
         --no-cache `
         -t $hardened `
-        $RepoRoot
-    if ($LASTEXITCODE -ne 0) {
-        Log-Err ("[{0}] overlay build failed; see error above" -f $Comp)
-        return 1
+        $RepoRoot 2>&1 | Out-Host
+    $rc = $LASTEXITCODE
+    if ($rc -ne 0) {
+        Log-Err ("[{0}] overlay build failed (docker exit {1}); see error above" -f $Comp, $rc)
+        return [int]1
     }
     Log-Ok ("[{0}] built {1}" -f $Comp, $hardened)
 
@@ -133,18 +146,15 @@ function Invoke-ComponentBuild {
 
     # 5. policy gate
     $verdict = Test-Policy -Crit $pCrit -High $pHigh
-    if ($verdict.StartsWith('PASS')) {
-        Log-Ok   ("[{0}] policy: {1}" -f $Comp, $verdict); return 0
-    } elseif ($verdict.StartsWith('FAIL')) {
-        Log-Err  ("[{0}] policy: {1}" -f $Comp, $verdict); return 2
-    } else {
-        Log-Warn ("[{0}] policy: {1}" -f $Comp, $verdict); return 0
-    }
+    if     ($verdict.StartsWith('PASS')) { Log-Ok   ("[{0}] policy: {1}" -f $Comp, $verdict); return [int]0 }
+    elseif ($verdict.StartsWith('FAIL')) { Log-Err  ("[{0}] policy: {1}" -f $Comp, $verdict); return [int]2 }
+    else                                 { Log-Warn ("[{0}] policy: {1}" -f $Comp, $verdict); return [int]0 }
 }
 
 $exitCode = 0
 foreach ($c in $Component) {
-    $rc = Invoke-ComponentBuild -Comp $c
+    # Force scalar int even if a downstream change ever leaks pipeline output.
+    $rc = [int](Invoke-ComponentBuild -Comp $c | Select-Object -Last 1)
     switch ($rc) {
         0 { }
         2 { $exitCode = 2 }
