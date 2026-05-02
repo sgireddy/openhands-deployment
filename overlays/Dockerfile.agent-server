@@ -48,3 +48,23 @@ RUN if [ -n "$PIP_UPGRADES" ]; then \
     else \
         echo ">>> No PIP_UPGRADES specified; skipping Python upgrades." ; \
     fi
+
+# ---- Remove unused openvscode-server language-only extensions --------------
+# The agent-server bundles openvscode-server with built-in language extensions
+# whose `package.json` names collide with vulnerable npm packages (e.g. the
+# vscode-published `handlebars` extension at v1.0.0 is just TextMate grammar
+# files — no template-engine code — but Trivy matches by `name+version` and
+# raises CVE-2019-19919 / 2021-23369 / 2021-23383 against the npm
+# `handlebars` template engine, which is a completely different package).
+#
+# Sandbox runtimes don't render Handlebars templates in the embedded editor,
+# so removing the syntax-highlighter extension is harmless and eliminates the
+# false-positive CVE rows at the source instead of via a suppression file.
+#
+# If you have any reason to keep these extensions, set
+# `--build-arg KEEP_VSCODE_HANDLEBARS=1` and they'll be left in place.
+ARG KEEP_VSCODE_HANDLEBARS=""
+RUN if [ -z "$KEEP_VSCODE_HANDLEBARS" ] && [ -d /openhands/.openvscode-server/extensions/handlebars ]; then \
+        echo ">>> Removing unused openvscode-server handlebars language extension (false-positive CVEs)" \
+        && rm -rf /openhands/.openvscode-server/extensions/handlebars ; \
+    fi
