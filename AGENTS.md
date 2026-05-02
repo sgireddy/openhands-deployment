@@ -183,6 +183,43 @@ see, the candidate is almost always one of:
 - A bundled npm pkg with a recent supply-chain advisory (undici, lodash,
   serialize-javascript, tar-fs, etc.)
 
+### Known Scout false positive: `gh` reporting grpc 1.78.0
+
+On `agent-server:custom_base-slim` (digest `844840c105c8…`), Scout
+reports `pkg:golang/google.golang.org/grpc@1.78.0` Critical for
+**CVE-2026-33186** (fixed in 1.79.3).
+
+This is **wrong**. The only Go binary in the slim image is
+`/usr/bin/gh` (GitHub CLI 2.92.0), and its actual Go BuildInfo says:
+
+    dep    google.golang.org/grpc  v1.80.0 h1:Xr6m2WmWZL…
+
+`v1.80.0` is past the fix (1.79.3), so the CVE does not apply. Trivy
+reads the same BuildInfo correctly and reports 0 Critical. gh's
+upstream `go.mod` and `go.sum` at v2.92.0 also confirm `v1.80.0` (no
+1.78.0 anywhere in the source tree). gh embeds the grpc package's
+`LICENSE` and `NOTICE.txt` as `embed.FS` data for its skill-install
+feature, but the runtime dep is v1.80.0.
+
+I haven't been able to reproduce the Scout report locally; presumably
+Scout's Go scanner picks up the embedded LICENSE path
+(`third-party/google.golang.org/grpc/`) and pairs it with a stale
+version from its DB instead of reading the BuildInfo's `dep` line.
+
+Workarounds for "0C in Scout" if absolutely required:
+1. Wait for Scout to update its detector (recommended — there is no
+   real CVE here, only a misreport).
+2. `apt-get remove --purge gh` in the overlay. Loses GitHub CLI
+   capability inside the agent — you can plumb the agent's GitHub
+   work through the user's host gh, or use the GitHub API directly
+   via `curl` + `$GITHUB_TOKEN`. This is a real product trade-off,
+   not a security trade-off.
+3. Replace gh with a self-built version that omits the third-party
+   embed.FS. Maintenance burden.
+
+Recommendation: keep gh and document the Scout report as a known false
+positive. Trivy is authoritative for this CVE.
+
 Cross-reference by asking the user to run from a GUI Terminal:
 
 ```
