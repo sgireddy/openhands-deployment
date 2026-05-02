@@ -76,17 +76,71 @@ function global:Load-Env {
 }
 
 # --- pre-flight -------------------------------------------------------------
+# Selects a CVE scanner. The SCANNER env var can be set to force one of
+# {scout, trivy}; default `auto` prefers Docker Scout (richer output, base-
+# image suggestions), falls back to Trivy when Scout isn't installed. Trivy
+# is also the right choice in non-interactive contexts (CI, scheduled tasks,
+# remote sessions) where Scout's Docker Hub login requirement gets in the way.
 function global:Test-Tools {
     if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
         Log-Err 'docker not found in PATH. Install Docker Desktop and retry.'
         exit 1
     }
-    # Probe scout. `docker scout version` exits non-zero if the plugin isn't installed.
+
+    $want = if ($env:SCANNER) { $env:SCANNER } else { 'auto' }
+    $scoutOk = $false
     $null = & docker scout version 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        Log-Err 'docker scout plugin not available. Install via: https://docs.docker.com/scout/install/'
-        exit 1
+    if ($LASTEXITCODE -eq 0) { $scoutOk = $true }
+    $trivyOk = [bool](Get-Command trivy -ErrorAction SilentlyContinue)
+
+    switch ($want) {
+        'scout' {
+            if (-not $scoutOk) { Log-Err 'SCANNER=scout but docker scout plugin not available'; exit 1 }
+            $env:SCANNER = 'scout'
+        }
+        'trivy' {
+            if (-not $trivyOk) { Log-Err 'SCANNER=trivy but trivy not on PATH (winget install AquaSecurity.Trivy)'; exit 1 }
+            $env:SCANNER = 'trivy'
+        }
+        'auto' {
+            if     ($scoutOk) { $env:SCANNER = 'scout' }
+            elseif ($trivyOk) { $env:SCANNER = 'trivy' }
+            else {
+                Log-Err 'No CVE scanner found. Install one of:'
+                Log-Err '  - Docker Scout (Docker Desktop, or https://docs.docker.com/scout/install/)'
+                Log-Err '  - Trivy        (winget install AquaSecurity.Trivy, or https://aquasecurity.github.io/trivy/)'
+                exit 1
+            }
+        }
+        default {
+            Log-Err ("SCANNER={0} is not one of {{auto, scout, trivy}}" -f $want); exit 1
+        }
     }
+    Log-Info ("Scanner: {0}" -f $env:SCANNER)
+}
+
+# --- scan dispatch ----------------------------------------------------------
+# Public entry points that build.ps1 / verify.ps1 use. They forward to the
+# Scout or Trivy back-end based on $env:SCANNER selected by Test-Tools.
+
+function global:Invoke-ScanImage {
+    param(
+        [Parameter(Mandatory)] [string]$Image,
+        [Parameter(Mandatory)] [string]$Prefix,
+        [Parameter(Mandatory)] [string]$RunDir
+    )
+    if ($env:SCANNER -eq 'trivy') {
+        Invoke-TrivyScan -Image $Image -Prefix $Prefix -RunDir $RunDir
+    } else {
+        Invoke-ScoutScan -Image $Image -Prefix $Prefix -RunDir $RunDir
+    }
+}
+
+function global:Get-ScanCounts {
+    param([Parameter(Mandatory)] [string]$QuickviewPath)
+    # Both back-ends emit the same "Target ... NC NH" shape, so the same
+    # parser works for both.
+    return Get-ScoutCounts $QuickviewPath
 }
 
 # --- scout scan -------------------------------------------------------------
@@ -165,6 +219,74 @@ function global:Get-ScoutCounts {
     return '?:?'
 }
 
+# --- trivy scan -------------------------------------------------------------
+# Mirrors the Scout report file layout so build.ps1 / verify.ps1 don't care
+# which scanner ran. We mirror Scout's defaults:
+#   --ignore-unfixed   (Scout's policy gate counts only fixable CVEs)
+#   --scanners vuln    (no secret/license scanning; CVEs only)
+function global:Invoke-TrivyScan {
+    param(
+        [Parameter(Mandatory)] [string]$Image,
+        [Parameter(Mandatory)] [string]$Prefix,
+        [Parameter(Mandatory)] [string]$RunDir
+    )
+    Log-Hdr ("Trivy scan: {0}  ({1})" -f $Prefix, $Image)
+    $qv   = Join-Path $RunDir ("{0}-quickview.txt"            -f $Prefix)
+    $ch   = Join-Path $RunDir ("{0}-cves-critical-high.txt"   -f $Prefix)
+    $pkg  = Join-Path $RunDir ("{0}-pkgs-critical-high.txt"   -f $Prefix)
+    $json = Join-Path $RunDir ("{0}-trivy.json"               -f $Prefix)
+
+    # JSON for machine parsing (counts), table for human reports.
+    & trivy image --quiet `
+        --severity CRITICAL,HIGH --ignore-unfixed --scanners vuln `
+        --pkg-types library,os --format json --output $json $Image
+    if ($LASTEXITCODE -ne 0) {
+        Log-Err ("[trivy] scan failed for {0}" -f $Image); return
+    }
+    $tableOut = & trivy image --quiet `
+        --severity CRITICAL,HIGH --ignore-unfixed --scanners vuln `
+        --pkg-types library,os --format table $Image 2>&1 | Out-String
+    Set-Content -LiteralPath $ch -Value $tableOut -Encoding utf8
+
+    # Build a Scout-shape quickview line so any external tooling that grep'd
+    # the previous "NC NH" format keeps working.
+    $crit = 0; $high = 0
+    try {
+        $report = Get-Content -LiteralPath $json -Raw | ConvertFrom-Json
+        foreach ($r in @($report.Results)) {
+            foreach ($v in @($r.Vulnerabilities)) {
+                switch (($v.Severity).ToUpper()) {
+                    'CRITICAL' { $crit++ }
+                    'HIGH'     { $high++ }
+                }
+            }
+        }
+    } catch { $crit = '?' ; $high = '?' }
+    $line = "  Target  |  {0}  |  {1}C {2}H 0M 0L 0?" -f $Image, $crit, $high
+    Set-Content -LiteralPath $qv -Value $line -Encoding utf8
+
+    # Vulnerable packages only — concise input for PIP_UPGRADES authoring.
+    $pkgLines = New-Object System.Collections.Generic.List[string]
+    $seen     = @{}
+    try {
+        $report = Get-Content -LiteralPath $json -Raw | ConvertFrom-Json
+        foreach ($r in @($report.Results)) {
+            $klass = if ($r.Class) { $r.Class } else { '?' }
+            $typ   = if ($r.Type)  { $r.Type }  else { '?' }
+            foreach ($v in @($r.Vulnerabilities)) {
+                $key = "$klass/$typ/$($v.PkgName)/$($v.InstalledVersion)"
+                if ($seen.ContainsKey($key)) { continue }
+                $seen[$key] = $true
+                $pkgLines.Add(("[{0}/{1}] {2} {3}  -> fixed by {4}" -f `
+                    $klass, $typ, $v.PkgName, $v.InstalledVersion, $v.FixedVersion))
+            }
+        }
+    } catch {}
+    Set-Content -LiteralPath $pkg -Value ($pkgLines -join [Environment]::NewLine) -Encoding utf8
+
+    Log-Info ("Saved: {0}/{1}-{{quickview,cves-critical-high,pkgs-critical-high,trivy.json}}" -f $RunDir, $Prefix)
+}
+
 # --- policy gate ------------------------------------------------------------
 # Returns 'PASS:...', 'FAIL:...' or 'UNKNOWN:...'.
 function global:Test-Policy {
@@ -172,7 +294,7 @@ function global:Test-Policy {
         [Parameter(Mandatory)] [string]$Crit,
         [Parameter(Mandatory)] [string]$High
     )
-    if ($Crit -eq '?' -or $High -eq '?') { return "UNKNOWN: scout output unparseable" }
+    if ($Crit -eq '?' -or $High -eq '?') { return "UNKNOWN: scanner output unparseable" }
 
     $cMax = [int]$env:POLICY_MAX_CRITICAL
     if ([int]$Crit -gt $cMax) {

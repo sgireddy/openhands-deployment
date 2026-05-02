@@ -60,8 +60,17 @@ codes, same reports. Pick whichever your shell prefers.
 
 ## Prerequisites
 
-- Docker Desktop (or Docker Engine ≥ 24.x) with **Docker Scout** available
-  (`docker scout version`).
+- Docker Desktop (or Docker Engine ≥ 24.x).
+- A CVE scanner — at least one of:
+  - **Docker Scout** (`docker scout version`) — preferred; gives base-image
+    suggestions and richer reports. Requires a Docker Hub login.
+  - **[Trivy](https://aquasecurity.github.io/trivy/)** (`trivy --version`)
+    — works without any registry login, so it's the right choice for CI,
+    cron jobs, or any non-interactive context where Scout's keychain-backed
+    auth doesn't reach. `brew install trivy` on macOS, `winget install
+    AquaSecurity.Trivy` on Windows, `apt-get install trivy` on Linux.
+  - The scripts auto-detect: Scout if both are present, otherwise Trivy.
+    Override with `SCANNER=trivy` (or `SCANNER=scout`) in `.env` or env.
 - One of:
   - **macOS** — bash scripts work as-is.
   - **Linux** (incl. **WSL2 Ubuntu**) — bash scripts work as-is.

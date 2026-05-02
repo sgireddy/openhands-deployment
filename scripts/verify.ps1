@@ -98,8 +98,8 @@ foreach ($c in $Component) {
         continue
     }
 
-    Invoke-ScoutScan -Image $image -Prefix "${c}-${scanLabel}" -RunDir $RunDir
-    $counts = Get-ScoutCounts (Join-Path $RunDir "${c}-${scanLabel}-quickview.txt")
+    Invoke-ScanImage -Image $image -Prefix "${c}-${scanLabel}" -RunDir $RunDir
+    $counts = Get-ScanCounts (Join-Path $RunDir "${c}-${scanLabel}-quickview.txt")
     $crit, $high = $counts -split ':'
     Log-Info ("[{0}] {1} ({2}) : {3}C / {4}H" -f $c, $scanLabel, $image, $crit, $high)
 

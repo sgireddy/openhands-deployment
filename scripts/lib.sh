@@ -100,21 +100,74 @@ load_env() {
 }
 
 # --- pre-flight -------------------------------------------------------------
+# Selects a CVE scanner. SCANNER env can be set to force one of {scout, trivy};
+# default `auto` prefers Docker Scout (richer output, base-image suggestions),
+# falls back to Trivy if Scout isn't installed. Trivy is also the right choice
+# in non-interactive contexts (CI, cron, SSH-without-keychain) where Scout's
+# Docker Hub login requirement gets in the way.
+#
+# Sets the global SCANNER to the chosen tool. Exits 1 if neither is usable.
 require_tools() {
     command -v docker >/dev/null \
         || { err "docker not on PATH"; exit 1; }
     docker info >/dev/null 2>&1 \
         || { err "Docker daemon not reachable"; exit 1; }
-    if ! docker scout version >/dev/null 2>&1; then
-        err "Docker Scout CLI not available."
-        err "  Install via Docker Desktop, or:"
-        err "  curl -sSfL https://raw.githubusercontent.com/docker/scout-cli/main/install.sh | sh -s --"
-        exit 1
-    fi
+
+    local want="${SCANNER:-auto}"
+    case "$want" in
+        scout)
+            docker scout version >/dev/null 2>&1 \
+                || { err "SCANNER=scout but Docker Scout CLI not available"; exit 1; }
+            SCANNER=scout ;;
+        trivy)
+            command -v trivy >/dev/null \
+                || { err "SCANNER=trivy but trivy not on PATH (brew install trivy)"; exit 1; }
+            SCANNER=trivy ;;
+        auto)
+            if docker scout version >/dev/null 2>&1; then
+                SCANNER=scout
+            elif command -v trivy >/dev/null; then
+                SCANNER=trivy
+            else
+                err "No CVE scanner found. Install one of:"
+                err "  - Docker Scout (Docker Desktop, or: curl -sSfL https://raw.githubusercontent.com/docker/scout-cli/main/install.sh | sh -s --)"
+                err "  - Trivy       (brew install trivy, or https://aquasecurity.github.io/trivy/)"
+                exit 1
+            fi ;;
+        *)
+            err "SCANNER=$want is not one of {auto, scout, trivy}"; exit 1 ;;
+    esac
+    export SCANNER
+    log "Scanner: $SCANNER"
 }
 
-# --- scout helpers ----------------------------------------------------------
-# Run quickview + cves for an image, save outputs under reports/<run>/<label>.
+# --- scan helpers (Scout + Trivy) -------------------------------------------
+# Both back-ends produce three files under $run_dir with these stable names so
+# build.sh / verify.sh don't care which scanner ran:
+#   <label>-quickview.txt           one-liner suitable for human eyes
+#   <label>-cves-critical-high.txt  full critical/high CVE listing
+#   <label>-pkgs-critical-high.txt  vulnerable-packages-only listing
+#
+# `scan_image` dispatches; `scan_counts` parses the quickview to "<crit>:<high>".
+
+# Public entry points -------------------------------------------------------
+
+scan_image() { # $1 = image, $2 = label, $3 = run_dir
+    case "${SCANNER:-scout}" in
+        trivy) trivy_scan "$@" ;;
+        *)     scout_scan "$@" ;;
+    esac
+}
+
+scan_counts() { # $1 = quickview file
+    case "${SCANNER:-scout}" in
+        trivy) trivy_counts "$@" ;;
+        *)     scout_counts "$@" ;;
+    esac
+}
+
+# Scout back-end ------------------------------------------------------------
+
 scout_scan() { # $1 = image, $2 = label, $3 = run_dir
     local image="$1" label="$2" run_dir="$3"
     mkdir -p "$run_dir"
@@ -145,12 +198,80 @@ scout_counts() { # $1 = quickview file
     ' "$f" 2>/dev/null || echo "n/a:n/a"
 }
 
+# Trivy back-end ------------------------------------------------------------
+# Trivy reports every fixable critical/high; we mirror Scout's defaults:
+#   --ignore-unfixed   (Scout's policy gate counts only fixable CVEs)
+#   --scanners vuln    (no secret/license scanning; we just want CVEs here)
+
+trivy_scan() { # $1 = image, $2 = label, $3 = run_dir
+    local image="$1" label="$2" run_dir="$3"
+    mkdir -p "$run_dir"
+    hdr "Trivy scan: $label  ($image)"
+    local json="$run_dir/${label}-trivy.json"
+    # JSON for machine parsing (counts), table for human-readable reports.
+    trivy image --quiet \
+        --severity CRITICAL,HIGH --ignore-unfixed --scanners vuln \
+        --pkg-types library,os --format json --output "$json" "$image" \
+        || { err "[trivy] scan failed for $image"; return 1; }
+    trivy image --quiet \
+        --severity CRITICAL,HIGH --ignore-unfixed --scanners vuln \
+        --pkg-types library,os --format table "$image" \
+        > "$run_dir/${label}-cves-critical-high.txt" 2>&1 || true
+    # Build a quickview line in Scout-compatible "NC NH" shape so any external
+    # tooling that grep'd the previous format keeps working.
+    python3 - "$json" "$image" > "$run_dir/${label}-quickview.txt" <<'PY' || true
+import json, sys
+path, image = sys.argv[1], sys.argv[2]
+try:
+    d = json.load(open(path))
+except Exception:
+    print(f"  Target  |  {image}  |  n/aC n/aH"); sys.exit(0)
+crit = high = 0
+for r in d.get("Results", []) or []:
+    for v in r.get("Vulnerabilities", []) or []:
+        s = (v.get("Severity") or "").upper()
+        if   s == "CRITICAL": crit += 1
+        elif s == "HIGH":     high += 1
+print(f"  Target  |  {image}  |  {crit}C {high}H 0M 0L 0?")
+PY
+    # Vulnerable packages only — concise input for PIP_UPGRADES authoring.
+    python3 - "$json" > "$run_dir/${label}-pkgs-critical-high.txt" <<'PY' || true
+import json, sys, collections
+d = json.load(open(sys.argv[1]))
+seen = collections.OrderedDict()
+for r in d.get("Results", []) or []:
+    klass = r.get("Class", "?"); typ = r.get("Type", "?")
+    for v in r.get("Vulnerabilities", []) or []:
+        key = (klass, typ, v.get("PkgName"), v.get("InstalledVersion"))
+        seen.setdefault(key, v.get("FixedVersion") or "")
+for (klass, typ, pkg, ver), fix in seen.items():
+    print(f"[{klass}/{typ}] {pkg} {ver}  -> fixed by {fix}")
+PY
+    log "Saved: $run_dir/${label}-{quickview,cves-critical-high,pkgs-critical-high,trivy.json}"
+}
+
+# Parse our trivy-quickview line (same shape as Scout's) → "<critical>:<high>".
+trivy_counts() { # $1 = quickview file
+    local f="$1"
+    [[ -f "$f" ]] || { echo "n/a:n/a"; return; }
+    awk '
+        /Target/ {
+            for (i=1; i<=NF; i++) {
+                if ($i ~ /^[0-9]+C$/ && $(i+1) ~ /^[0-9]+H$/) {
+                    c=$i; h=$(i+1); gsub(/C/,"",c); gsub(/H/,"",h);
+                    print c ":" h; exit
+                }
+            }
+        }
+    ' "$f" 2>/dev/null || echo "n/a:n/a"
+}
+
 # Apply policy: $1 = critical count, $2 = high count.
 # Exits 2 if violated. Stdout: "PASS" or "FAIL: <reason>".
 policy_check() { # $1 critical, $2 high
     local crit="$1" high="$2"
     if [[ "$crit" == "n/a" ]]; then
-        echo "UNKNOWN: could not parse scout output"; return 0
+        echo "UNKNOWN: could not parse scanner output"; return 0
     fi
     if (( crit > POLICY_MAX_CRITICAL )); then
         echo "FAIL: $crit CRITICAL > policy limit $POLICY_MAX_CRITICAL"; return 2
