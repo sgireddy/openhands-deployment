@@ -107,3 +107,68 @@ RUN if [ -n "$STRIP_BROWSER_TOOLS" ]; then \
     else \
         echo ">>> Keeping browser/VNC stack (set STRIP_BROWSER_TOOLS=1 to remove)." ; \
     fi
+
+# ---- Optional: strip the embedded docker-in-docker stack ------------------
+# The upstream agent-server bundles a full Docker + containerd stack
+# (containerd.io, docker-ce, docker-ce-cli, docker-buildx-plugin,
+# docker-compose-plugin, docker-ce-rootless-extras, runc, rootlesskit) so
+# the agent can `docker build` / `docker run` inside the sandbox during a
+# conversation. That stack is the source of any Critical CVE that lives in
+# `containerd` / `dockerd` / `ctr` / `runc` (Go binaries that statically
+# link `google.golang.org/grpc` etc.). For example, as of this writing
+# `containerd 2.2.3` (the latest version Docker has published in their apt
+# feed) links `google.golang.org/grpc 1.78.0`, which Scout grades:
+#
+#     CVE-2026-33186  google.golang.org/grpc  v1.78.0  CVSS 9.1  CRITICAL
+#
+# There is currently no upstream `containerd.io` package newer than 2.2.3
+# in `download.docker.com/linux/debian bookworm/stable`, so apt-upgrade
+# cannot fix it. The only ways to clear it are (a) wait for upstream, or
+# (b) delete the stack from the slim image entirely.
+#
+# Most agent deployments don't need docker-in-docker — the agent is itself
+# already running inside a container managed by the host's Docker daemon.
+# Setting `--build-arg STRIP_DIND=1` purges the entire DinD stack (and
+# autoremoves transitive deps like `tini`, `pigz`, `iptables-persistent`,
+# `slirp4netns`, etc.). The agent's filesystem ops, shell, code-edit and
+# embedded openvscode-server are all unaffected.
+#
+# Trade-offs documented in README.md ("Slim variant" section). To rebuild
+# with docker-in-docker later, omit the build-arg or pass STRIP_DIND=
+# (empty).
+ARG STRIP_DIND=""
+RUN if [ -n "$STRIP_DIND" ]; then \
+        echo ">>> Stripping docker-in-docker stack: docker-ce, containerd.io, runc, buildx, compose + transitive deps" \
+        && apt-get update -y \
+        && apt-get purge -y --auto-remove \
+            docker-ce docker-ce-cli docker-ce-rootless-extras \
+            docker-buildx-plugin docker-compose-plugin \
+            containerd.io \
+            runc \
+        && apt-get clean \
+        && rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/* ; \
+    else \
+        echo ">>> Keeping docker-in-docker stack (set STRIP_DIND=1 to remove)." ; \
+    fi
+
+# ---- Replace older bundled Node 22 with the already-fixed system Node 22 --
+# `/opt/acp-node/bin/node` is a copy of Node 22.14.0 that the upstream image
+# bundles for the third-party Agent-Client-Protocol tools (gemini-cli,
+# claude-agent-acp, codex-acp). Node 22.14.0 is affected by:
+#
+#     CVE-2025-55130  node  >=22.0.0 <22.22.0  CRITICAL
+#
+# The image already ships a fixed `/usr/local/bin/node` at v22.22.x for the
+# bundled openvscode-server, so we can repoint the older copy at it instead
+# of dragging in a fresh tarball. This is a no-op when the file is missing.
+RUN if [ -f /opt/acp-node/bin/node ] && [ -x /usr/local/bin/node ]; then \
+        bundled_ver="$(/opt/acp-node/bin/node --version 2>/dev/null || echo unknown)" ; \
+        system_ver="$(/usr/local/bin/node --version 2>/dev/null || echo unknown)" ; \
+        if [ "$bundled_ver" != "$system_ver" ]; then \
+            echo ">>> Replacing /opt/acp-node/bin/node ($bundled_ver) with system /usr/local/bin/node ($system_ver) — clears CVE-2025-55130" \
+            && rm -f /opt/acp-node/bin/node \
+            && ln -s /usr/local/bin/node /opt/acp-node/bin/node ; \
+        else \
+            echo ">>> /opt/acp-node/bin/node already matches /usr/local/bin/node ($system_ver); no replacement needed." ; \
+        fi ; \
+    fi

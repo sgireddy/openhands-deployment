@@ -30,6 +30,33 @@ DOCKER_CONFIG=$HOME/.docker-ssh   # logged-in Docker config inside SSH sessions
                                   # which is locked from non-GUI sessions)
 ```
 
+**Two-step setup for `~/.docker-ssh` (one-time):**
+
+1. From an interactive Mac Terminal.app session (so credsStore is reachable):
+   ```
+   DOCKER_CONFIG=$HOME/.docker-ssh docker login -u sgireddy
+   ```
+   This populates `~/.docker-ssh/config.json` but with `credsStore:
+   "osxkeychain"` — which **doesn't help SSH-driven docker** because
+   keychain is still locked from non-GUI sessions.
+2. Strip the `credsStore` line and re-login. The CLI will print a
+   "stored unencrypted" warning, which is what we want — token now lives
+   in the file:
+   ```
+   python3 -c 'import json; p="$HOME/.docker-ssh/config.json"; d=json.load(open(p)); d.pop("credsStore", None); d.pop("credHelpers", None); json.dump(d, open(p, "w"), indent=2)'
+   DOCKER_CONFIG=$HOME/.docker-ssh docker login -u sgireddy
+   ```
+   After this, `ssh mac 'env DOCKER_CONFIG=$HOME/.docker-ssh docker push …'`
+   works without keychain unlock.
+
+Also wire buildx + plugins into `~/.docker-ssh` (else SSH sessions can't
+find buildx):
+```
+mkdir -p ~/.docker-ssh
+ln -sfn ~/.docker/cli-plugins ~/.docker-ssh/cli-plugins
+ln -sfn ~/.docker/buildx      ~/.docker-ssh/buildx
+```
+
 Scout binary inside SSH sessions is keychain-blocked even with
 `DOCKER_CONFIG` workaround (Scout requires interactive login). Use
 **Trivy** for any scan driven from the agent. The user can run Scout
@@ -96,17 +123,27 @@ components that carry the CVEs.
 | `sgireddy/openhands:custom_base-slim`            | `7eaf2901c9c8…`             | strip vscode build sandbox + bump litellm/lxml       |
 | `sgireddy/agent-server:custom_base`              | `8e88e6506cca…`             | regular hardened                                     |
 | `sgireddy/agent-server:custom_base-1.19.1`       | `8e88e6506cca…`             | (alias of regular)                                   |
-| `sgireddy/agent-server:custom_base-slim`         | `b9dcaa5c2495…`             | no chromium/VNC/Mesa                                 |
-| `sgireddy/agent-server:custom_base-slim-1.19.1`  | `b9dcaa5c2495…`             | (alias of slim)                                      |
+| `sgireddy/agent-server:custom_base-slim`         | `1ccb3dab9839…`             | no chromium/VNC/Mesa + no DinD + node 22.22 symlink  |
+| `sgireddy/agent-server:custom_base-slim-1.19.1`  | `1ccb3dab9839…`             | (alias of slim)                                      |
 
-Per-arch digests for the agent-server slim manifest list:
-- `linux/amd64` → `sha256:fc18673724…`
-- `linux/arm64` → `sha256:0d80333bb8…`
+Per-arch digests for the agent-server slim manifest list (`1ccb3dab9839…`):
+- `linux/amd64` → `sha256:ef631df568f8…`
+- `linux/arm64` → `sha256:69c8f996c191…`
+
+Per-arch digests for the openhands slim manifest list (`7eaf2901c9c8…`):
+- `linux/amd64` → `sha256:cb8c44098772…`
+- `linux/arm64` → `sha256:2338959a9de3…`
 
 The openhands slim is built on top of `sgireddy/openhands:custom_base`
 itself (which is already multi-arch on Hub), so the BASE_IMAGE for
 the slim build is `docker.io/sgireddy/openhands:custom_base` — not the
 local `openhands:latest` used for the regular `:custom_base`.
+
+Previous agent-server slim digest before the DinD strip: `b9dcaa5c2495…`
+(amd64 `fc18673724…`, arm64 `0d80333bb8…`). That tag had Trivy 0C but
+Scout 2C (`google.golang.org/grpc 1.78.0` inside containerd 2.2.3 + node
+22.14.0 in `/opt/acp-node`). The current `1ccb3dab9839…` slim is 0C on
+both Scout and Trivy.
 
 ## Scout vs Trivy DB drift
 
