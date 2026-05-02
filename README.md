@@ -536,6 +536,47 @@ Then `./scripts/build.sh agent-server`.
 ./scripts/update.sh --apply             # bump .env and rebuild
 ```
 
+### Slim variant — strip embedded browser / VNC desktop
+
+The upstream `agent-server` image bundles a full graphical stack —
+chromium, a Mesa GL driver chain, ~30 X11 / freedesktop libs, TigerVNC,
+novnc, and the system Debian Node 20 — so the agent's "browser" tool can
+drive a real headless Chromium and a human operator can VNC-attach to
+watch desktop sessions. That stack is the source of every Critical CVE
+that's *not* a documented false-positive (Mesa, TigerVNC, undici-via-novnc).
+
+If your conversations never use the browser tool — i.e., the agent only
+edits code and runs shells — you can build a slim variant that purges
+the entire stack and gets the image to **0 Critical CVEs**:
+
+```bash
+docker buildx build \
+    --file overlays/Dockerfile.agent-server \
+    --platform linux/amd64,linux/arm64 \
+    --build-arg BASE_IMAGE=ghcr.io/openhands/agent-server:1.19.1-python \
+    --build-arg STRIP_BROWSER_TOOLS=1 \
+    --tag <your-registry>/agent-server:custom_base-slim \
+    --tag <your-registry>/agent-server:custom_base-slim-1.19.1 \
+    --push .
+```
+
+Verify with Trivy (or Scout): both arches should report `Critical: 0`.
+
+**What stops working in the slim image**
+
+- The agent's browser tool (any task that fetches/renders/screenshots a
+  web page through Chromium). Plain HTTP via `curl` / Python `requests`
+  still works — fine for JSON APIs and static HTML, useless for SPAs.
+- VNC desktop attach (you can no longer point a viewer at the sandbox).
+- System `node`. The bundled Node 22 at `/usr/local/bin/node` (which
+  `openvscode-server` actually uses) is untouched, so the embedded editor
+  keeps working. Custom user code that expects `/usr/bin/node` to be
+  there will need to be updated to use `/usr/local/bin/node` instead.
+
+To rebuild without the strip later, omit the build-arg or pass an empty
+value (`--build-arg STRIP_BROWSER_TOOLS=`).
+
+
 ### Check what changed between baseline and hardened
 ```bash
 REPORTS="${REPORTS_DIR:-$HOME/openhands-deployment/reports}"
