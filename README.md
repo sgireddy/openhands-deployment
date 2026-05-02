@@ -544,17 +544,37 @@ overlay exposes an opt-in build-arg that purges the unused stack at
 overlay-build time, getting the result to **0 Critical CVEs across both
 Trivy and Scout, on `linux/amd64` and `linux/arm64`**.
 
-#### `agent-server:custom_base-slim` — strip embedded browser / VNC desktop
+#### `agent-server:custom_base-slim` — strip embedded browser/VNC + docker-in-docker
 
-The upstream `agent-server` image bundles a full graphical stack —
-chromium, a Mesa GL driver chain, ~30 X11 / freedesktop libs, TigerVNC,
-novnc, and the system Debian Node 20 — so the agent's "browser" tool can
-drive a real headless Chromium and a human operator can VNC-attach to
-watch desktop sessions. That stack is the source of every Critical CVE
-that's *not* a documented false-positive (Mesa, TigerVNC, undici-via-novnc).
+The upstream `agent-server` image bundles two large optional stacks the
+agent doesn't always need:
 
-If your conversations never use the browser tool — i.e., the agent only
-edits code and runs shells — build the slim variant:
+1. **A full graphical desktop** — chromium, a Mesa GL driver chain, ~30
+   X11 / freedesktop libs, TigerVNC, novnc, and the system Debian Node 20
+   — so the agent's "browser" tool can drive a real headless Chromium and
+   a human operator can VNC-attach to watch desktop sessions. Source of
+   every chromium / Mesa / TigerVNC / novnc-undici CVE.
+
+2. **Docker-in-docker** — `containerd.io`, `docker-ce`, `docker-ce-cli`,
+   `docker-buildx-plugin`, `docker-compose-plugin`, `runc`, plus the
+   `dockerd` daemon and `rootlesskit`/`tini` lifecycle plumbing — so the
+   agent can `docker build` and `docker run` inside its sandbox during a
+   conversation. Source of every `containerd` / `dockerd` / `ctr` Go-binary
+   CVE. As of this writing, `containerd.io 2.2.3` (the latest version
+   Docker has published in their Debian apt feed) statically links
+   `google.golang.org/grpc 1.78.0`, which Scout grades **CRITICAL** as
+   `CVE-2026-33186` (CVSS 9.1) — and there is no `2.2.4` to upgrade to,
+   so apt cannot fix it. Stripping the stack is the only path to 0C.
+
+The slim variant also replaces a stale Node 22.14.0 binary at
+`/opt/acp-node/bin/node` (used by the bundled gemini-cli / claude-agent-acp
+/ codex-acp third-party Agent-Client-Protocol tools) with a symlink to
+the already-shipped fixed `/usr/local/bin/node` v22.22.x — clears
+**CVE-2025-55130 (CRITICAL)** without dragging in a fresh tarball.
+
+If your conversations never use the browser tool, never `docker build`
+inside the agent sandbox, and the agent only edits code and runs shells,
+build the slim variant with both strips on:
 
 ```bash
 docker buildx build \
@@ -562,24 +582,34 @@ docker buildx build \
     --platform linux/amd64,linux/arm64 \
     --build-arg BASE_IMAGE=ghcr.io/openhands/agent-server:1.19.1-python \
     --build-arg STRIP_BROWSER_TOOLS=1 \
+    --build-arg STRIP_DIND=1 \
     --tag <your-registry>/agent-server:custom_base-slim \
     --tag <your-registry>/agent-server:custom_base-slim-1.19.1 \
     --push .
 ```
 
+The two strip flags are independent — turning on only one is supported
+if you need just half of the trade-off.
+
 **What stops working in the slim image**
 
-- The agent's browser tool (any task that fetches/renders/screenshots a
-  web page through Chromium). Plain HTTP via `curl` / Python `requests`
+- The agent's **browser tool** (any task that fetches/renders/screenshots
+  a web page through Chromium). Plain HTTP via `curl` / Python `requests`
   still works — fine for JSON APIs and static HTML, useless for SPAs.
-- VNC desktop attach (you can no longer point a viewer at the sandbox).
-- System `node`. The bundled Node 22 at `/usr/local/bin/node` (which
+- **VNC desktop attach** (you can no longer point a viewer at the sandbox).
+- **Docker-in-docker**. The agent can no longer `docker build`,
+  `docker run`, `docker compose up`, etc. *from inside* the sandbox. The
+  host's Docker (which is what runs the agent in the first place) is
+  unaffected — this is purely about whether the agent itself can drive a
+  nested Docker engine. Most deployments don't need that.
+- **System `node`**. The bundled Node 22 at `/usr/local/bin/node` (which
   `openvscode-server` actually uses) is untouched, so the embedded editor
-  keeps working. Custom user code that expects `/usr/bin/node` to be
-  there will need to be updated to use `/usr/local/bin/node` instead.
+  keeps working. Custom user code that expected `/usr/bin/node` to exist
+  needs to switch to `/usr/local/bin/node`.
 
-To rebuild without the strip later, omit the build-arg or pass an empty
-value (`--build-arg STRIP_BROWSER_TOOLS=`).
+To rebuild without one of the strips later, omit that specific build-arg
+or pass it empty (`--build-arg STRIP_BROWSER_TOOLS=`,
+`--build-arg STRIP_DIND=`).
 
 #### `openhands:custom_base-slim` — strip VS Code extension build sandbox + bump litellm/lxml
 
