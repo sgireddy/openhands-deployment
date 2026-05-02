@@ -536,7 +536,15 @@ Then `./scripts/build.sh agent-server`.
 ./scripts/update.sh --apply             # bump .env and rebuild
 ```
 
-### Slim variant — strip embedded browser / VNC desktop
+### Slim variants — strip unused embedded stacks
+
+Both upstream images bundle large optional stacks that scanners count
+against the CVE budget but that many deployments never exercise. Each
+overlay exposes an opt-in build-arg that purges the unused stack at
+overlay-build time, getting the result to **0 Critical CVEs across both
+Trivy and Scout, on `linux/amd64` and `linux/arm64`**.
+
+#### `agent-server:custom_base-slim` — strip embedded browser / VNC desktop
 
 The upstream `agent-server` image bundles a full graphical stack —
 chromium, a Mesa GL driver chain, ~30 X11 / freedesktop libs, TigerVNC,
@@ -546,8 +554,7 @@ watch desktop sessions. That stack is the source of every Critical CVE
 that's *not* a documented false-positive (Mesa, TigerVNC, undici-via-novnc).
 
 If your conversations never use the browser tool — i.e., the agent only
-edits code and runs shells — you can build a slim variant that purges
-the entire stack and gets the image to **0 Critical CVEs**:
+edits code and runs shells — build the slim variant:
 
 ```bash
 docker buildx build \
@@ -559,8 +566,6 @@ docker buildx build \
     --tag <your-registry>/agent-server:custom_base-slim-1.19.1 \
     --push .
 ```
-
-Verify with Trivy (or Scout): both arches should report `Critical: 0`.
 
 **What stops working in the slim image**
 
@@ -575,6 +580,81 @@ Verify with Trivy (or Scout): both arches should report `Critical: 0`.
 
 To rebuild without the strip later, omit the build-arg or pass an empty
 value (`--build-arg STRIP_BROWSER_TOOLS=`).
+
+#### `openhands:custom_base-slim` — strip VS Code extension build sandbox + bump litellm/lxml
+
+The upstream `openhands` web image ships the source tree of the
+"OpenHands Integration" VS Code extension under
+`/app/openhands/integrations/vscode/`, including:
+
+- `node_modules/` — ~219 MB of npm devDependencies + transitive deps
+  used to compile the extension (minimatch, undici, flatted, glob, jws,
+  lodash, picomatch, serialize-javascript, tar-fs, underscore, …).
+- `out/extension.js{,.map}` — the compiled output of those sources.
+- `openhands-vscode-0.0.1.vsix` — the actual deliverable users install
+  in their own VS Code.
+
+The web container is a Python ASGI app and never executes any of that
+JavaScript at runtime — only the `.vsix` is shipped to end users. The
+build sandbox is the source of every fixable npm HIGH that Trivy reports
+on this image, and Scout grades at least one of those advisories
+(typically the `litellm` GHSA, sometimes `lxml`) as Critical.
+
+The slim variant removes the build sandbox and pins fresher versions of
+two security-sensitive Python libraries:
+
+```bash
+docker buildx build \
+    --file overlays/Dockerfile.openhands \
+    --platform linux/amd64,linux/arm64 \
+    --build-arg BASE_IMAGE=docker.io/sgireddy/openhands:custom_base \
+    --build-arg PIP_UPGRADES="litellm==1.83.7 lxml==6.1.0" \
+    --build-arg STRIP_VSCODE_BUILD_ARTIFACTS=1 \
+    --tag <your-registry>/openhands:custom_base-slim \
+    --push .
+```
+
+(Replace `BASE_IMAGE` with whichever upstream openhands image you build
+your regular `:custom_base` from — e.g. a locally-built `openhands:latest`,
+`ghcr.io/all-hands-ai/openhands:<tag>`, or your fleet's own published
+tag. Stacking on top of `:custom_base` like the example above is the
+fastest path because it skips re-applying the apt upgrade layer.)
+
+**What stops working in the slim image**
+
+- Re-building the bundled VS Code extension from inside the container
+  (you'd need to `npm install` first). The shipped `.vsix` is untouched,
+  so end-users keep installing it in their editor exactly as before.
+- Nothing else. The web app, frontend bundle, agent orchestration code,
+  Jupyter integration, and Python CLI are all unaffected.
+
+To rebuild without the strip later, omit the build-arg or pass an empty
+value (`--build-arg STRIP_VSCODE_BUILD_ARTIFACTS=`).
+
+#### Switching to the slim variants
+
+Set the corresponding `*_OUT_TAG` in your `.env` and `docker compose pull
+&& up -d`:
+
+```env
+OPENHANDS_OUT_TAG=custom_base-slim
+AGENT_SERVER_OUT_TAG=custom_base-slim
+```
+
+Verify any published tag with Trivy:
+
+```bash
+for img in <your-registry>/openhands:custom_base-slim \
+           <your-registry>/agent-server:custom_base-slim; do
+    for arch in amd64 arm64; do
+        echo "=== $img linux/$arch ==="
+        trivy image --severity CRITICAL --scanners vuln \
+              --pkg-types library,os \
+              --platform "linux/$arch" "$img" 2>/dev/null | tail -5
+    done
+done
+# Expected: Total: 0 (CRITICAL: 0) for every combination.
+```
 
 
 ### Check what changed between baseline and hardened

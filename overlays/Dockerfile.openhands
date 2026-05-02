@@ -52,6 +52,40 @@ RUN if [ -n "$PIP_UPGRADES" ]; then \
         echo ">>> No PIP_UPGRADES specified; skipping Python upgrades." ; \
     fi
 
+# ---- Optional: strip unused VS Code extension build artifacts -------------
+# The upstream openhands web image bundles
+#   /app/openhands/integrations/vscode/
+#       node_modules/                (~219 MB of npm devDeps + transitive deps)
+#       out/extension.js{,.map}      (compiled output of those sources)
+#       openhands-vscode-0.0.1.vsix  (the actual deliverable shipped to users)
+#
+# The Python web container never executes any of that JavaScript at runtime —
+# the .vsix is what an end-user installs in their own VS Code, and the
+# node_modules/out tree is the build sandbox left over from compiling it.
+#
+# Trivy / Scout still scan that build tree, so it's the source of every fixable
+# npm HIGH (minimatch / undici / flatted / glob / jws / lodash / picomatch /
+# serialize-javascript / tar-fs / underscore / @isaacs/brace-expansion / ...).
+# Some of those advisories are graded Critical by Scout (GHSA → NVD severity
+# drift, see AGENTS.md). Stripping the build sandbox removes the entire pile
+# without touching the .vsix that ships to users.
+#
+# Set `--build-arg STRIP_VSCODE_BUILD_ARTIFACTS=1` to remove. Default keeps
+# the upstream layout untouched.
+USER root
+ARG STRIP_VSCODE_BUILD_ARTIFACTS=""
+RUN if [ -n "$STRIP_VSCODE_BUILD_ARTIFACTS" ]; then \
+        VSC=/app/openhands/integrations/vscode; \
+        if [ -d "$VSC" ]; then \
+            echo ">>> Stripping VS Code extension build artifacts under $VSC (keeping .vsix)" \
+            && rm -rf "$VSC/node_modules" "$VSC/out" ; \
+        else \
+            echo ">>> $VSC not found; nothing to strip." ; \
+        fi ; \
+    else \
+        echo ">>> Keeping VS Code build artifacts (set STRIP_VSCODE_BUILD_ARTIFACTS=1 to remove)." ; \
+    fi
+
 # Match upstream runtime expectations (entrypoint runs as root, drops privs).
 USER root
 WORKDIR /app
