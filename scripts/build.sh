@@ -117,9 +117,9 @@ build_component() {
     ok "[$comp] upstream cached: $upstream"
 
     # 2. baseline scan
-    scout_scan "$upstream" "${comp}-01-baseline" "$RUN_DIR" \
+    scan_image "$upstream" "${comp}-01-baseline" "$RUN_DIR" \
         || { err "[$comp] baseline scout scan failed"; return 1; }
-    local b_counts; b_counts="$(scout_counts "$RUN_DIR/${comp}-01-baseline-quickview.txt")"
+    local b_counts; b_counts="$(scan_counts "$RUN_DIR/${comp}-01-baseline-quickview.txt")"
     local b_crit="${b_counts%%:*}" b_high="${b_counts##*:}"
     log "[$comp] baseline           : ${b_crit}C / ${b_high}H"
 
@@ -138,9 +138,9 @@ build_component() {
     ok "[$comp] built $hardened"
 
     # 4. post-overlay scan
-    scout_scan "$hardened" "${comp}-02-post-overlay" "$RUN_DIR" \
+    scan_image "$hardened" "${comp}-02-post-overlay" "$RUN_DIR" \
         || { err "[$comp] post-overlay scout scan failed"; return 1; }
-    local p_counts; p_counts="$(scout_counts "$RUN_DIR/${comp}-02-post-overlay-quickview.txt")"
+    local p_counts; p_counts="$(scan_counts "$RUN_DIR/${comp}-02-post-overlay-quickview.txt")"
     local p_crit="${p_counts%%:*}" p_high="${p_counts##*:}"
     log "[$comp] after overlay      : ${p_crit}C / ${p_high}H   (was ${b_crit}C / ${b_high}H)"
 

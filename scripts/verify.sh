@@ -84,8 +84,8 @@ for comp in "${COMPONENTS[@]}"; do
         continue
     }
 
-    scout_scan "$image" "${comp}-${SCAN_TARGET}" "$RUN_DIR"
-    counts="$(scout_counts "$RUN_DIR/${comp}-${SCAN_TARGET}-quickview.txt")"
+    scan_image "$image" "${comp}-${SCAN_TARGET}" "$RUN_DIR"
+    counts="$(scan_counts "$RUN_DIR/${comp}-${SCAN_TARGET}-quickview.txt")"
     crit="${counts%%:*}"; high="${counts##*:}"
     log "[$comp] $SCAN_TARGET ($image) : ${crit}C / ${high}H"
 

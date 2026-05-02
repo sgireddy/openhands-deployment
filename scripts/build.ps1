@@ -125,8 +125,8 @@ function Invoke-ComponentBuild {
     Log-Ok ("[{0}] upstream cached: {1}" -f $Comp, $upstream)
 
     # 2. baseline scan
-    Invoke-ScoutScan -Image $upstream -Prefix "${Comp}-01-baseline" -RunDir $RunDir
-    $bCounts = Get-ScoutCounts (Join-Path $RunDir "${Comp}-01-baseline-quickview.txt")
+    Invoke-ScanImage -Image $upstream -Prefix "${Comp}-01-baseline" -RunDir $RunDir
+    $bCounts = Get-ScanCounts (Join-Path $RunDir "${Comp}-01-baseline-quickview.txt")
     $bCrit, $bHigh = $bCounts -split ':'
     Log-Info ("[{0}] baseline           : {1}C / {2}H" -f $Comp, $bCrit, $bHigh)
 
@@ -148,8 +148,8 @@ function Invoke-ComponentBuild {
     Log-Ok ("[{0}] built {1}" -f $Comp, $hardened)
 
     # 4. post-overlay scan
-    Invoke-ScoutScan -Image $hardened -Prefix "${Comp}-02-post-overlay" -RunDir $RunDir
-    $pCounts = Get-ScoutCounts (Join-Path $RunDir "${Comp}-02-post-overlay-quickview.txt")
+    Invoke-ScanImage -Image $hardened -Prefix "${Comp}-02-post-overlay" -RunDir $RunDir
+    $pCounts = Get-ScanCounts (Join-Path $RunDir "${Comp}-02-post-overlay-quickview.txt")
     $pCrit, $pHigh = $pCounts -split ':'
     Log-Info ("[{0}] after overlay      : {1}C / {2}H   (was {3}C / {4}H)" -f $Comp, $pCrit, $pHigh, $bCrit, $bHigh)
 
