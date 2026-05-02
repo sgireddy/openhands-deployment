@@ -90,17 +90,23 @@ components that carry the CVEs.
 
 ## Tags currently on Docker Hub
 
-| Tag                                              | Manifest list digest        | Purpose                |
-|--------------------------------------------------|-----------------------------|------------------------|
-| `sgireddy/openhands:custom_base`                 | `7b3e9c5d5523…` *(local)*   | regular hardened       |
-| `sgireddy/agent-server:custom_base`              | `8e88e6506cca…`             | regular hardened       |
-| `sgireddy/agent-server:custom_base-1.19.1`       | `8e88e6506cca…`             | (alias of regular)     |
-| `sgireddy/agent-server:custom_base-slim`         | `b9dcaa5c2495…`             | no chromium/VNC/Mesa   |
-| `sgireddy/agent-server:custom_base-slim-1.19.1`  | `b9dcaa5c2495…`             | (alias of slim)        |
+| Tag                                              | Manifest list digest        | Purpose                                              |
+|--------------------------------------------------|-----------------------------|------------------------------------------------------|
+| `sgireddy/openhands:custom_base`                 | `7b3e9c5d5523…`             | regular hardened                                     |
+| `sgireddy/openhands:custom_base-slim`            | `7eaf2901c9c8…`             | strip vscode build sandbox + bump litellm/lxml       |
+| `sgireddy/agent-server:custom_base`              | `8e88e6506cca…`             | regular hardened                                     |
+| `sgireddy/agent-server:custom_base-1.19.1`       | `8e88e6506cca…`             | (alias of regular)                                   |
+| `sgireddy/agent-server:custom_base-slim`         | `b9dcaa5c2495…`             | no chromium/VNC/Mesa                                 |
+| `sgireddy/agent-server:custom_base-slim-1.19.1`  | `b9dcaa5c2495…`             | (alias of slim)                                      |
 
-Per-arch digests for the slim manifest list:
+Per-arch digests for the agent-server slim manifest list:
 - `linux/amd64` → `sha256:fc18673724…`
 - `linux/arm64` → `sha256:0d80333bb8…`
+
+The openhands slim is built on top of `sgireddy/openhands:custom_base`
+itself (which is already multi-arch on Hub), so the BASE_IMAGE for
+the slim build is `docker.io/sgireddy/openhands:custom_base` — not the
+local `openhands:latest` used for the regular `:custom_base`.
 
 ## Scout vs Trivy DB drift
 
