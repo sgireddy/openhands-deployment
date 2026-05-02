@@ -114,36 +114,63 @@ components that carry the CVEs.
 - **npm packages baked into `node_modules`** are harder. Either accept
   them, use npm `overrides` in a package.json patch, or remove the
   bundled tool that pulled them in.
+- **`docker buildx --push` MUST include `--provenance=false`** when the
+  goal is "Scout sees 0 Critical". BuildKit's default in-toto SLSA
+  provenance attestation lists the BASE_IMAGE as a `resolvedDependency`
+  (`pkg:docker/<base-ref>?platform=...`). Scout follows that pointer
+  and indexes the **base image's** SBOM as if those packages were still
+  present — so Critical CVEs you cleanly purged with apt-get get
+  reported anyway. Trivy is unaffected (it scans actual layers).
+  Symptom: Trivy 0C, Scout 1C+, Scout's report says
+  `provenance: <git ref> <last commit SHA before push>`. Disable the
+  attestation with `--provenance=false`. (We could alternatively try
+  attaching a fresh image SBOM via `--attest type=sbom` but that
+  requires an extra scanner pass and isn't tested in this repo.)
 
 ## Tags currently on Docker Hub
 
 | Tag                                              | Manifest list digest        | Purpose                                              |
 |--------------------------------------------------|-----------------------------|------------------------------------------------------|
 | `sgireddy/openhands:custom_base`                 | `7b3e9c5d5523…`             | regular hardened                                     |
-| `sgireddy/openhands:custom_base-slim`            | `7eaf2901c9c8…`             | strip vscode build sandbox + bump litellm/lxml       |
+| `sgireddy/openhands:custom_base-slim`            | `d3202281ddc4…`             | strip vscode build sandbox + bump litellm/lxml       |
 | `sgireddy/agent-server:custom_base`              | `8e88e6506cca…`             | regular hardened                                     |
 | `sgireddy/agent-server:custom_base-1.19.1`       | `8e88e6506cca…`             | (alias of regular)                                   |
-| `sgireddy/agent-server:custom_base-slim`         | `1ccb3dab9839…`             | no chromium/VNC/Mesa + no DinD + node 22.22 symlink  |
-| `sgireddy/agent-server:custom_base-slim-1.19.1`  | `1ccb3dab9839…`             | (alias of slim)                                      |
+| `sgireddy/agent-server:custom_base-slim`         | `844840c105c8…`             | no chromium/VNC/Mesa + no DinD + node 22.22 symlink  |
+| `sgireddy/agent-server:custom_base-slim-1.19.1`  | `844840c105c8…`             | (alias of slim)                                      |
 
-Per-arch digests for the agent-server slim manifest list (`1ccb3dab9839…`):
-- `linux/amd64` → `sha256:ef631df568f8…`
-- `linux/arm64` → `sha256:69c8f996c191…`
+Per-arch digests for the agent-server slim manifest list (`844840c105c8…`):
+- `linux/amd64` → `sha256:0e85ee72836a…`
+- `linux/arm64` → `sha256:d38788cfe77f…`
 
-Per-arch digests for the openhands slim manifest list (`7eaf2901c9c8…`):
-- `linux/amd64` → `sha256:cb8c44098772…`
-- `linux/arm64` → `sha256:2338959a9de3…`
+Per-arch digests for the openhands slim manifest list (`d3202281ddc4…`):
+- amd64 + arm64 (same arch keys as agent-server, run
+  `docker buildx imagetools inspect` for the current per-arch digests).
 
 The openhands slim is built on top of `sgireddy/openhands:custom_base`
 itself (which is already multi-arch on Hub), so the BASE_IMAGE for
 the slim build is `docker.io/sgireddy/openhands:custom_base` — not the
 local `openhands:latest` used for the regular `:custom_base`.
 
-Previous agent-server slim digest before the DinD strip: `b9dcaa5c2495…`
-(amd64 `fc18673724…`, arm64 `0d80333bb8…`). That tag had Trivy 0C but
-Scout 2C (`google.golang.org/grpc 1.78.0` inside containerd 2.2.3 + node
-22.14.0 in `/opt/acp-node`). The current `1ccb3dab9839…` slim is 0C on
-both Scout and Trivy.
+History of the slim digests (most recent first):
+
+- agent-server slim
+  - `844840c105c8…` — current. Built with `--provenance=false` so Scout
+    can't follow the BASE_IMAGE provenance dep back to the upstream
+    SBOM. This is what finally takes Scout to 0C.
+  - `1ccb3dab9839…` — had STRIP_DIND + node fix in the layer content,
+    but Scout still reported `grpc 1.78.0` because it was reading the
+    BuildKit-generated SLSA provenance attestation, which lists
+    `pkg:docker/ghcr.io/openhands/agent-server@1.19.1-python` as a
+    dependency, and Scout followed that to the upstream SBOM (which
+    DOES list grpc 1.78). Trivy was 0C on this digest because Trivy
+    scans actual layers.
+  - `b9dcaa5c2495…` — first slim with `STRIP_BROWSER_TOOLS=1` only.
+    Trivy 0C, Scout 2C (grpc 1.78 from containerd, node 22.14 from
+    `/opt/acp-node`).
+
+- openhands slim
+  - `d3202281ddc4…` — current, built with `--provenance=false`.
+  - `7eaf2901c9c8…` — earlier, with provenance enabled.
 
 ## Scout vs Trivy DB drift
 

@@ -583,6 +583,7 @@ docker buildx build \
     --build-arg BASE_IMAGE=ghcr.io/openhands/agent-server:1.19.1-python \
     --build-arg STRIP_BROWSER_TOOLS=1 \
     --build-arg STRIP_DIND=1 \
+    --provenance=false \
     --tag <your-registry>/agent-server:custom_base-slim \
     --tag <your-registry>/agent-server:custom_base-slim-1.19.1 \
     --push .
@@ -590,6 +591,18 @@ docker buildx build \
 
 The two strip flags are independent — turning on only one is supported
 if you need just half of the trade-off.
+
+> **Why `--provenance=false`?** Without that flag, BuildKit attaches an
+> in-toto SLSA provenance attestation that lists the BASE_IMAGE as a
+> `resolvedDependency`. Docker Scout follows that pointer and indexes the
+> base image's SBOM **as if those packages were still present in our
+> image**. So even after `STRIP_DIND=1` physically deletes
+> `/usr/bin/containerd` (etc.), Scout would still report
+> `google.golang.org/grpc 1.78.0` as Critical because the upstream
+> `agent-server` image's SBOM lists containerd. Disabling the provenance
+> attestation forces Scout to fall back to scanning the actual filesystem
+> layers, which is what we want here. (Trivy is unaffected — it always
+> scans layers directly.)
 
 **What stops working in the slim image**
 
@@ -640,6 +653,7 @@ docker buildx build \
     --build-arg BASE_IMAGE=docker.io/sgireddy/openhands:custom_base \
     --build-arg PIP_UPGRADES="litellm==1.83.7 lxml==6.1.0" \
     --build-arg STRIP_VSCODE_BUILD_ARTIFACTS=1 \
+    --provenance=false \
     --tag <your-registry>/openhands:custom_base-slim \
     --push .
 ```
@@ -649,6 +663,9 @@ your regular `:custom_base` from — e.g. a locally-built `openhands:latest`,
 `ghcr.io/all-hands-ai/openhands:<tag>`, or your fleet's own published
 tag. Stacking on top of `:custom_base` like the example above is the
 fastest path because it skips re-applying the apt upgrade layer.)
+
+`--provenance=false` is important: see the explanation under the
+`agent-server:custom_base-slim` section above.
 
 **What stops working in the slim image**
 
