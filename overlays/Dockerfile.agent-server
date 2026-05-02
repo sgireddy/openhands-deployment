@@ -68,3 +68,42 @@ RUN if [ -z "$KEEP_VSCODE_HANDLEBARS" ] && [ -d /openhands/.openvscode-server/ex
         echo ">>> Removing unused openvscode-server handlebars language extension (false-positive CVEs)" \
         && rm -rf /openhands/.openvscode-server/extensions/handlebars ; \
     fi
+
+# ---- Optional: strip the embedded browser / VNC desktop stack -------------
+# The upstream agent-server image bundles a full graphical stack so the
+# agent's "browser" tool can drive a real Chromium and so a human operator
+# can VNC-attach to watch desktop sessions. That stack pulls in a long tail
+# of OS packages (chromium, Mesa GL, X11/freedesktop libs, TigerVNC, novnc,
+# system Node 20). Each is a separate CVE surface — for example, as of this
+# writing all three Critical CVEs left in the image come from this stack:
+#
+#     CVE-2026-40393  Mesa libgbm1 / libgl1-mesa-dri / libglx-mesa0 /
+#                     mesa-libgallium  (transitive of chromium)
+#     CVE-2026-34352  tigervnc-common / tigervnc-standalone-server
+#     CVE-2026-1525   node-undici        (transitive of novnc → nodejs)
+#
+# If your conversations never ask the agent to "open this URL", "screenshot
+# this site", "fill this form" etc. — i.e., the agent only edits code and
+# runs shells — this entire stack is dead weight. Setting
+# `--build-arg STRIP_BROWSER_TOOLS=1` purges it (and everything it depends
+# on, via apt-get autoremove). The bundled openvscode-server keeps working
+# because it ships its own Node v22 at /usr/local/bin/node, independent of
+# the system Debian Node that goes away.
+#
+# Trade-offs documented in README.md ("Slim variant" section). To rebuild
+# with browser tools later, omit the build-arg or pass STRIP_BROWSER_TOOLS=
+# (empty).
+ARG STRIP_BROWSER_TOOLS=""
+RUN if [ -n "$STRIP_BROWSER_TOOLS" ]; then \
+        echo ">>> Stripping browser/VNC stack: chromium, tigervnc, novnc, x11-utils + transitive deps" \
+        && apt-get update -y \
+        && apt-get purge -y --auto-remove \
+            chromium chromium-common \
+            tigervnc-standalone-server tigervnc-common \
+            novnc \
+            x11-utils \
+        && apt-get clean \
+        && rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/* ; \
+    else \
+        echo ">>> Keeping browser/VNC stack (set STRIP_BROWSER_TOOLS=1 to remove)." ; \
+    fi
