@@ -8,7 +8,7 @@
 #                                    (`make build`) or pulled from whichever
 #                                    registry your fleet uses.
 #   - ghcr.io/openhands/agent-server:<tag>
-#                                    `docker pull ghcr.io/openhands/agent-server:1.19.0-python`
+#                                    `docker pull ghcr.io/openhands/agent-server:1.31.1-python`
 #                                    (public — no auth needed for read).
 #
 # For each component (openhands, agent-server):

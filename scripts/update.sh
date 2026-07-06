@@ -43,7 +43,7 @@ command -v python3 >/dev/null || { err "python3 required"; exit 1; }
 # --- discovery via GitHub releases ------------------------------------------
 SDK_REPO="OpenHands/software-agent-sdk"
 
-# Latest SDK release tag (e.g. "v1.19.0"). Empty string on failure.
+# Latest SDK release tag (e.g. "v1.31.1"). Empty string on failure.
 latest_sdk_release() {
     local hdr=()
     [[ -n "${GITHUB_TOKEN:-}" ]] && hdr=(-H "Authorization: Bearer $GITHUB_TOKEN")
@@ -81,7 +81,7 @@ if [[ -z "$sdk_tag" ]]; then
     warn "  could not reach GitHub releases API (rate limit? offline?)"
     as_newest=""
 else
-    # Strip leading "v": v1.19.0 → 1.19.0
+    # Strip leading "v": v1.31.1 → 1.31.1
     sdk_ver="${sdk_tag#v}"
     candidate="${sdk_ver}-python"
     log "  latest SDK release : $sdk_tag"
