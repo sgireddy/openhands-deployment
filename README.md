@@ -116,7 +116,7 @@ something:
 
 ```bash
 docker image inspect openhands:latest                              >/dev/null && echo openhands OK
-docker image inspect ghcr.io/openhands/agent-server:1.19.0-python  >/dev/null && echo agent-server OK
+docker image inspect ghcr.io/openhands/agent-server:1.31.1-python  >/dev/null && echo agent-server OK
 ```
 
 If either is missing:
@@ -139,7 +139,7 @@ project. Each SDK GitHub release `vX.Y.Z` produces a corresponding image
 tag `X.Y.Z-python`. No login required:
 
 ```bash
-docker pull ghcr.io/openhands/agent-server:1.19.0-python
+docker pull ghcr.io/openhands/agent-server:1.31.1-python
 ```
 
 ### Versioning policy
@@ -164,9 +164,9 @@ warnings exist for.
 every run. It's never a build blocker, just visibility:
 
 ```
-[ OK ] agent-server pin is on latest stable (1.19.0-python)
+[ OK ] agent-server pin is on latest stable (1.31.1-python)
 # or
-[WARN] agent-server pin DRIFT: current=1.18.1-python  latest-stable=1.19.0-python
+[WARN] agent-server pin DRIFT: current=1.30.0-python  latest-stable=1.31.1-python
 [WARN]   policy: track latest stable. Bump unless a known regression justifies holding.
 [WARN]   to update: ./scripts/update.sh --apply
 ```
@@ -498,7 +498,7 @@ All knobs live in `.env`. Defaults are visible in `.env.example`.
 | `OPENHANDS_BASE_IMAGE`        | `openhands`                                    | Local image name (built via `make build`). Override to point at your registry. |
 | `OPENHANDS_BASE_TAG`          | `latest`                                       | Tag of the upstream OpenHands image |
 | `AGENT_SERVER_BASE_IMAGE`     | `ghcr.io/openhands/agent-server`               | Upstream agent-server repo |
-| `AGENT_SERVER_BASE_TAG`       | `1.19.0-python`                                | Upstream tag to pull |
+| `AGENT_SERVER_BASE_TAG`       | `1.31.1-python`                                | Upstream tag to pull |
 | `OPENHANDS_OUT_IMAGE/TAG`     | `openhands:custom_base`                        | Locally-built hardened image |
 | `AGENT_SERVER_OUT_IMAGE/TAG`  | `agent-server:custom_base`                     | Locally-built hardened image |
 | `HOST_PORT`                   | `3000`                                         | Host port for the web UI |
@@ -580,12 +580,12 @@ build the slim variant with both strips on:
 docker buildx build \
     --file overlays/Dockerfile.agent-server \
     --platform linux/amd64,linux/arm64 \
-    --build-arg BASE_IMAGE=ghcr.io/openhands/agent-server:1.19.1-python \
+    --build-arg BASE_IMAGE=ghcr.io/openhands/agent-server:1.31.1-python \
     --build-arg STRIP_BROWSER_TOOLS=1 \
     --build-arg STRIP_DIND=1 \
     --provenance=false \
     --tag <your-registry>/agent-server:custom_base-slim \
-    --tag <your-registry>/agent-server:custom_base-slim-1.19.1 \
+    --tag <your-registry>/agent-server:custom_base-slim-1.31.1 \
     --push .
 ```
 

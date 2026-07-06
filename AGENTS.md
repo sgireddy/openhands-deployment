@@ -129,6 +129,18 @@ components that carry the CVEs.
 
 ## Tags currently on Docker Hub
 
+> **Maintenance note (pin bumped to `1.31.1-python`).** The
+> `AGENT_SERVER_BASE_TAG` pin in `.env.example` / `scripts/lib.{sh,ps1}`
+> was upgraded from `1.19.1-python` to the latest stable SDK release
+> `1.31.1-python` (software-agent-sdk `v1.31.1`, image verified on GHCR).
+> The `openhands` web image stays on the operator-managed floating
+> `:latest` (built from source via `make build`) — no pin to bump.
+> The digests, `custom_base-1.19.1` / `custom_base-slim-1.19.1` alias
+> tags, and the per-version CVE analysis below still describe the
+> **previous `1.19.1` build**; they must be re-generated once the user
+> rebuilds and pushes the `1.31.1`-based images, and the containerd/grpc
+> false-positive notes should be re-verified against the new base.
+
 | Tag                                              | Manifest list digest        | Purpose                                              |
 |--------------------------------------------------|-----------------------------|------------------------------------------------------|
 | `sgireddy/openhands:custom_base`                 | `7b3e9c5d5523…`             | regular hardened                                     |

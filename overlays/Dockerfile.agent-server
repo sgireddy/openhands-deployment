@@ -9,16 +9,16 @@
 #
 # Build:
 #   docker build -f overlays/Dockerfile.agent-server \
-#       --build-arg BASE_IMAGE=ghcr.io/openhands/agent-server:1.19.0-python \
+#       --build-arg BASE_IMAGE=ghcr.io/openhands/agent-server:1.31.1-python \
 #       -t agent-server:custom_base .
 #
 # With Python upgrades:
 #   docker build -f overlays/Dockerfile.agent-server \
-#       --build-arg BASE_IMAGE=ghcr.io/openhands/agent-server:1.19.0-python \
+#       --build-arg BASE_IMAGE=ghcr.io/openhands/agent-server:1.31.1-python \
 #       --build-arg PIP_UPGRADES="urllib3==2.5.0 cryptography==45.0.0" \
 #       -t agent-server:custom_base .
 
-ARG BASE_IMAGE=ghcr.io/openhands/agent-server:1.19.0-python
+ARG BASE_IMAGE=ghcr.io/openhands/agent-server:1.31.1-python
 FROM ${BASE_IMAGE}
 
 ARG BASE_IMAGE

@@ -88,7 +88,7 @@ load_env() {
     : "${OPENHANDS_BASE_IMAGE:=openhands}"
     : "${OPENHANDS_BASE_TAG:=latest}"
     : "${AGENT_SERVER_BASE_IMAGE:=ghcr.io/openhands/agent-server}"
-    : "${AGENT_SERVER_BASE_TAG:=1.19.0-python}"
+    : "${AGENT_SERVER_BASE_TAG:=1.31.1-python}"
     : "${OPENHANDS_OUT_IMAGE:=openhands}"
     : "${OPENHANDS_OUT_TAG:=custom_base}"
     : "${AGENT_SERVER_OUT_IMAGE:=agent-server}"
