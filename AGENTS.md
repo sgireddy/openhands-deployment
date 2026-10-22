@@ -97,6 +97,65 @@ user explicitly does NOT want that filter as default; the goal is
 **Critical=0 across the board**, achieved by removing the unused
 components that carry the CVEs.
 
+## emSign / eMudhra CA distrust (2026-10)
+
+The emSign root (eMudhra's CA brand) had compromised intermediate CA
+keys and is being distrusted everywhere. It shows up in **three**
+independent trust stores in our images, and each needs its own fix —
+removing one does NOT cover the others:
+
+1. **Debian system trust store** (`ca-certificates`). Debian blacklisted
+   `emSign ECC Root CA - G3` in `ca-certificates 20260816+nmu1`
+   (bug #1151413, NMU 2026-10-20) but that upload only reached
+   `sid`/`forky`. `trixie` (20250419) and `bookworm` (20230311+deb12u1)
+   still trust it, so `apt-get upgrade` alone does NOT remove it. The
+   overlays now blacklist it explicitly (prefix the
+   `mozilla/emSign_ECC_Root_CA_-_G3.crt` line in
+   `/etc/ca-certificates.conf` with `!`, then
+   `update-ca-certificates --fresh`). Default-on; opt out with
+   `--build-arg KEEP_EMSIGN_ROOT=1` once stable backports the distrust.
+   The overlay step self-verifies and fails the build if the entry name
+   changed upstream or an emSign link survives in `/etc/ssl/certs`.
+2. **Python `certifi`** (`GHSA-6q48-6c7w-9gw2`) — bundles its own CA
+   pem. Fixed in `certifi 2026.10.19`. Bump via `PIP_UPGRADES_*`.
+3. **`uv`** (`GHSA-hq85-5cpj-mr62`) — vendors a webpki root set that
+   trusts the emSign root. Fixed in `uv 0.13.4`. If `uv` is a standalone
+   binary rather than a venv dep, the pip bump may not move it — then
+   `uv self update` or replace `/usr/local/bin/uv` in the overlay.
+
+Related TLS-cert bug bundled alongside: `anyio` `CVE-2026-63374` (TLS
+certificate spoofing via IDNA) — fixed in `anyio 4.14.2`.
+
+## Trivy CRITICAL review snapshot (2026-10-22)
+
+Scanned the **published** Hub slim images with fresh Trivy DB. Both have
+accumulated Criticals because the artifacts predate these CVEs — a
+rebuild + re-push is required. Most OS Criticals clear automatically on
+rebuild (fixed versions are in `trixie-security`); the pip ones need the
+`PIP_UPGRADES_*` pins now recorded in `.env.example`.
+
+`sgireddy/openhands:custom_base-slim` — 28 Critical:
+- OS (fixed on rebuild): `libgnutls30t64` 3.8.9-3+deb13u2→u4 (2),
+  `perl*`/`libperl5.40` 5.40.1-6→+deb13u1 (many).
+- OS (NO fix, document): `openssh-*`/`ssh` `CVE-2026-60002`.
+- Python pins: `certifi`→2026.10.19, `anyio`→4.14.2, `litellm`→1.84.0
+  (`CVE-2026-49468`), `pillow`→13.0.0 (4 CVEs), `GitPython`→3.1.59,
+  `PyJWT`→2.14.0, `jupyter_server`→2.20.0.
+
+`sgireddy/agent-server:custom_base-slim` — 31 Critical:
+- OS (fixed on rebuild): `libglib2.0-0t64`/`-data` →2.84.4-3~deb13u4 (2),
+  `libgnutls30t64` →u4 (2), `perl*` →+deb13u1, `linux-libc-dev`
+  →6.12.113-1 (the fixed ones).
+- OS (NO fix, document): `libxml2` `CVE-2026-6653`; `linux-libc-dev`
+  `CVE-2026-93221` (kernel *headers* only — not a running kernel, low
+  runtime impact; consider dropping the dev package).
+- Node (bundled npm — harder, see patterns): `@google/gemini-cli`
+  0.38.0→0.39.1 (`CVE-2026-12537`, RCE), `proxy-addr` 2.0.7→2.0.8,
+  `tar` →7.5.19 (`CVE-2026-59873`).
+- Python pins: `certifi`→2026.10.19, `uv`→0.13.4, `anyio`→4.14.2.
+
+Re-scan from the registry after rebuild/push to confirm 0C.
+
 ## Known-good patterns
 
 - **Strip unused embedded stacks** rather than chasing upstream-no-fix
