@@ -149,12 +149,46 @@ rebuild (fixed versions are in `trixie-security`); the pip ones need the
 - OS (NO fix, document): `libxml2` `CVE-2026-6653`; `linux-libc-dev`
   `CVE-2026-93221` (kernel *headers* only — not a running kernel, low
   runtime impact; consider dropping the dev package).
-- Node (bundled npm — harder, see patterns): `@google/gemini-cli`
-  0.38.0→0.39.1 (`CVE-2026-12537`, RCE), `proxy-addr` 2.0.7→2.0.8,
-  `tar` →7.5.19 (`CVE-2026-59873`).
+- Node (bundled npm): `@google/gemini-cli` 0.38.0→0.39.1
+  (`CVE-2026-12537`, RCE), `proxy-addr` 2.0.7→2.0.8, `tar` →7.5.19
+  (`CVE-2026-59873`). **Now fixed in the overlay** (see below).
 - Python pins: `certifi`→2026.10.19, `uv`→0.13.4, `anyio`→4.14.2.
 
 Re-scan from the registry after rebuild/push to confirm 0C.
+
+### Bundled-npm fix (agent-server overlay)
+
+A default-on step updates the npm toolchains and ACP agent CLIs in place
+rather than stripping them (the ACP agents are a product feature):
+
+- Update bundled `npm` to `12.2.1` in both `/usr/local` and
+  `/opt/acp-node` — it vendors `tar ^7.5.22`, clearing every
+  `npm`-internal `tar` copy (`CVE-2026-59873`).
+- Update `@google/gemini-cli` to `0.39.1` (`CVE-2026-12537` RCE).
+- Refresh `proxy-addr` to `2.0.8` under `claude-agent-acp`
+  (best-effort; the `POLICY_MAX_CRITICAL=0` scan gate is the backstop).
+
+Pins are build-args (`NPM_PIN`, `GEMINI_CLI_PIN`, `PROXY_ADDR_PIN`); opt
+out with `--build-arg KEEP_BUNDLED_NPM=1`. This step needs network and
+could not be exercised in the authoring environment — validate on the
+first Mac build; the self-fail/scan-gate catches a wrong path assumption.
+
+### No-fix OS CVEs — decisions
+
+These have no fixed Debian package yet; accept and track, do not strip:
+
+- `openssh-*`/`ssh` `CVE-2026-60002` (openhands) — openssh is used for
+  git-over-SSH; keep. Revisit when `trixie-security` ships a fix.
+- `libxml2` `CVE-2026-6653` (agent-server) — core library, broadly
+  depended on; keep.
+- `linux-libc-dev` `CVE-2026-93221` (agent-server) — kernel *headers*,
+  not a running kernel; negligible runtime risk. Removable if nothing
+  compiles against headers at runtime, but kept by default to avoid
+  breaking source builds of pip packages.
+
+Because these are unfixable, they do NOT violate `POLICY_MAX_CRITICAL=0`
+when the scan gate is run with fixed-only filtering; keep the default
+(no `--ignore-unfixed`) and treat them as a documented exception.
 
 ## Known-good patterns
 
