@@ -156,6 +156,45 @@ rebuild (fixed versions are in `trixie-security`); the pip ones need the
 
 Re-scan from the registry after rebuild/push to confirm 0C.
 
+## Base-image currency + litellm supply-chain (2026-10-22)
+
+Target the newest published bases:
+
+- **agent-server**: `ghcr.io/openhands/agent-server:1.58.0-python` (newest
+  release, multi-arch amd64+arm64, Debian 13.4 / Trixie). `.env.example`
+  `AGENT_SERVER_BASE_TAG` bumped 1.19.1-python → 1.58.0-python.
+  `scripts/update.{sh,ps1}` already derive this tag from the SDK's latest
+  GitHub release, so they need no edit.
+- **openhands app**: newest OpenHands release is **v1.31.0** (2026-10-22).
+  The 1.x app is SDK-based and is NOT published as a single `1.31.0`
+  container under `openhands/openhands` or `all-hands-ai/openhands` (those
+  are the legacy 0.x line). Build the base locally from the `v1.31.0` tag
+  (`make build`) or use your fleet's derived image — the repo's
+  `OPENHANDS_BASE_IMAGE=openhands:latest` local-build flow is unchanged.
+
+### litellm — pin `1.93.2`, never `1.107.x`
+
+Both images pull litellm via `openhands-sdk` v1.58.0, which constrains
+`litellm>=1.93.0,<1.106` (1.106+ needs `mcp>=2`, breaks on mcp 1.x; see
+software-agent-sdk #6088). Evidence from OSV (2026-10-22):
+
+- **`litellm` 1.107.0 is MALICIOUS** — OSV `MAL-2026-2144` (also 1.82.7,
+  1.82.8). 1.107.0 is yanked from PyPI (install → 404). **Never pin it.**
+- `CVE-2026-84377` (`GHSA-3cv6-jpf6-8222`): authenticated SSRF +
+  provider-credential exfiltration. Fixed on the 1.93 branch in **1.93.2**
+  (mainline 1.88.6). The SDK lock target 1.93.0 and our old 1.84.0 pin are
+  both still vulnerable.
+- Secure+compatible window is therefore **[1.93.2, 1.106)**. We pin
+  `litellm==1.93.2` (minimal bump off the SDK's own branch, fixes 84377).
+  1.105.x is the newest within the cap if a newer one is ever wanted.
+- Residual no-fix litellm advisories (`CVE-2026-1277x`/`1279x`) are
+  authenticated-proxy issues; OpenHands uses litellm as a client library,
+  so they do not apply. Accept/track like the no-fix OS CVEs.
+
+`litellm==1.93.2` is now in both `PIP_UPGRADES_OPENHANDS` and
+`PIP_UPGRADES_AGENT_SERVER` (the agent-server bundles the SDK too, so it
+ships litellm and needs the same pin).
+
 ### Bundled-npm fix (agent-server overlay)
 
 A default-on step updates the npm toolchains and ACP agent CLIs in place
