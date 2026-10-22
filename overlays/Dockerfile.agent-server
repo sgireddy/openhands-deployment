@@ -203,3 +203,55 @@ RUN if [ -f /opt/acp-node/bin/node ] && [ -x /usr/local/bin/node ]; then \
             echo ">>> /opt/acp-node/bin/node already matches /usr/local/bin/node ($system_ver); no replacement needed." ; \
         fi ; \
     fi
+
+# ---- Fix Critical CVEs in bundled npm toolchains and ACP agent CLIs --------
+# A fresh Trivy scan of the slim image flagged these bundled-npm Criticals:
+#
+#   @google/gemini-cli 0.38.0  CVE-2026-12537  RCE via workspace-trust bypass
+#                              (fixed 0.39.1) — /opt/acp-node global package
+#   tar (several copies)       CVE-2026-59873  gzip-bomb DoS (fixed 7.5.19) —
+#                              vendored inside each `npm` install
+#   proxy-addr 2.0.7           CVE-2026-90711  IP spoofing (fixed 2.0.8) —
+#                              nested under @agentclientprotocol/claude-agent-acp
+#
+# We fix them in place rather than stripping, because the ACP agent CLIs are a
+# product feature. Updating the bundled `npm` to a version that vendors
+# tar>=7.5.19 clears every `npm`-internal tar copy at once; gemini-cli is bumped
+# directly; proxy-addr is refreshed best-effort in the claude-agent-acp tree.
+#
+# Pins (verified present on the npm registry, 2026-10-22):
+#   npm 12.2.1 vendors tar ^7.5.22 (>= the 7.5.19 fix)
+#   @google/gemini-cli 0.39.1 is the minimum fixed release
+#
+# The downstream build.sh scan gate (POLICY_MAX_CRITICAL=0) is the backstop:
+# if any of these survive, the build fails there. Opt out with
+# `--build-arg KEEP_BUNDLED_NPM=1`.
+ARG KEEP_BUNDLED_NPM=""
+ARG NPM_PIN="12.2.1"
+ARG GEMINI_CLI_PIN="0.39.1"
+ARG PROXY_ADDR_PIN="2.0.8"
+RUN if [ -n "$KEEP_BUNDLED_NPM" ]; then \
+        echo ">>> KEEP_BUNDLED_NPM set; leaving bundled npm packages untouched." ; \
+    else \
+        set -e ; \
+        for npm_bin in /usr/local/bin/npm /opt/acp-node/bin/npm; do \
+            if [ -x "$npm_bin" ]; then \
+                echo ">>> Updating bundled npm at $npm_bin to $NPM_PIN (vendors tar>=7.5.19)" ; \
+                "$npm_bin" install -g --no-audit --no-fund "npm@${NPM_PIN}" ; \
+            fi ; \
+        done ; \
+        if [ -x /opt/acp-node/bin/npm ]; then \
+            echo ">>> Updating @google/gemini-cli to $GEMINI_CLI_PIN (clears CVE-2026-12537 RCE)" ; \
+            /opt/acp-node/bin/npm install -g --no-audit --no-fund "@google/gemini-cli@${GEMINI_CLI_PIN}" ; \
+        fi ; \
+        acp_dir=/opt/acp-node/lib/node_modules/@agentclientprotocol/claude-agent-acp ; \
+        if [ -d "$acp_dir" ]; then \
+            echo ">>> Refreshing proxy-addr to $PROXY_ADDR_PIN under claude-agent-acp (best-effort)" ; \
+            ( cd "$acp_dir" && /opt/acp-node/bin/npm install --no-save --no-audit --no-fund "proxy-addr@${PROXY_ADDR_PIN}" ) \
+                || echo ">>> WARN: proxy-addr refresh did not complete; scan gate will confirm final state." ; \
+        fi ; \
+        ( /usr/local/bin/npm cache clean --force >/dev/null 2>&1 || true ) ; \
+        ( /opt/acp-node/bin/npm cache clean --force >/dev/null 2>&1 || true ) ; \
+        rm -rf /root/.npm ; \
+        echo ">>> Bundled npm CVE fixes applied." ; \
+    fi

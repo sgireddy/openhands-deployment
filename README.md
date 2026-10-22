@@ -581,6 +581,7 @@ docker buildx build \
     --file overlays/Dockerfile.agent-server \
     --platform linux/amd64,linux/arm64 \
     --build-arg BASE_IMAGE=ghcr.io/openhands/agent-server:1.19.1-python \
+    --build-arg PIP_UPGRADES="certifi==2026.10.19 uv==0.13.4 anyio==4.14.2" \
     --build-arg STRIP_BROWSER_TOOLS=1 \
     --build-arg STRIP_DIND=1 \
     --provenance=false \
@@ -591,6 +592,13 @@ docker buildx build \
 
 The two strip flags are independent — turning on only one is supported
 if you need just half of the trade-off.
+
+The `PIP_UPGRADES` above clears the fixable Critical Python CVEs
+(`certifi`/`uv` emSign CA distrust, `anyio` TLS spoofing). Two further
+default-on steps run without any flag: the emSign system-root blacklist
+and the bundled-npm fix (updates `npm`→12.2.1, `@google/gemini-cli`→0.39.1,
+`proxy-addr`→2.0.8). Opt out with `--build-arg KEEP_EMSIGN_ROOT=1` and
+`--build-arg KEEP_BUNDLED_NPM=1` respectively.
 
 > **Why `--provenance=false`?** Without that flag, BuildKit attaches an
 > in-toto SLSA provenance attestation that lists the BASE_IMAGE as a
@@ -651,12 +659,19 @@ docker buildx build \
     --file overlays/Dockerfile.openhands \
     --platform linux/amd64,linux/arm64 \
     --build-arg BASE_IMAGE=docker.io/sgireddy/openhands:custom_base \
-    --build-arg PIP_UPGRADES="litellm==1.83.7 lxml==6.1.0" \
+    --build-arg PIP_UPGRADES="certifi==2026.10.19 anyio==4.14.2 litellm==1.84.0 pillow==13.0.0 GitPython==3.1.59 PyJWT==2.14.0 jupyter_server==2.20.0 lxml==6.1.0" \
     --build-arg STRIP_VSCODE_BUILD_ARTIFACTS=1 \
     --provenance=false \
     --tag <your-registry>/openhands:custom_base-slim \
     --push .
 ```
+
+The `PIP_UPGRADES` list clears the fixable Critical Python CVEs found in
+the 2026-10-22 Trivy review (`certifi` emSign distrust, `anyio` TLS
+spoofing, `litellm`, `pillow`, `GitPython`, `PyJWT`, `jupyter_server`).
+`pillow` 12→13 is a major bump — review if you depend on its API. The
+emSign system-root blacklist also runs by default here
+(`--build-arg KEEP_EMSIGN_ROOT=1` to opt out).
 
 (Replace `BASE_IMAGE` with whichever upstream openhands image you build
 your regular `:custom_base` from — e.g. a locally-built `openhands:latest`,
