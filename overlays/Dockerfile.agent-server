@@ -39,6 +39,37 @@ RUN apt-get update -y \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
+# ---- Distrust the emSign (eMudhra) root ------------------------------------
+# Debian blacklisted "emSign ECC Root CA - G3" in ca-certificates
+# 20260816+nmu1 (bug #1151413, NMU 2026-10-20), but that upload only reached
+# sid/forky. The stable suites the base images are built on still ship an
+# older ca-certificates (trixie: 20250419, bookworm: 20230311+deb12u1) that
+# STILL trusts the emSign root, so `apt-get upgrade` above does NOT remove it.
+#
+# We blacklist it explicitly now by prefixing its entry in
+# /etc/ca-certificates.conf with "!" and regenerating the trust store. The
+# build fails if the expected entry is missing (upstream rename) or if an
+# emSign link survives in /etc/ssl/certs after regeneration, so this can never
+# silently no-op. Set KEEP_EMSIGN_ROOT=1 to opt out once Debian stable
+# backports the distrust.
+ARG KEEP_EMSIGN_ROOT=""
+RUN if [ -z "$KEEP_EMSIGN_ROOT" ]; then \
+        echo ">>> Distrusting emSign (eMudhra) root: emSign ECC Root CA - G3" ; \
+        conf=/etc/ca-certificates.conf ; \
+        entry="mozilla/emSign_ECC_Root_CA_-_G3.crt" ; \
+        if ! grep -qxF "$entry" "$conf"; then \
+            echo "ERROR: expected trust entry '$entry' not found in $conf; emSign filename may have changed upstream" >&2 ; exit 1 ; \
+        fi \
+        && sed -i -E "s@^(mozilla/emSign_ECC_Root_CA_-_G3\.crt)@!\1@" "$conf" \
+        && update-ca-certificates --fresh \
+        && if ls -1 /etc/ssl/certs/ | grep -qi emSign; then \
+               echo "ERROR: emSign root still trusted after blacklist" >&2 ; exit 1 ; \
+           fi \
+        && echo ">>> emSign root successfully distrusted." ; \
+    else \
+        echo ">>> KEEP_EMSIGN_ROOT set; leaving emSign root trusted." ; \
+    fi
+
 # ---- Optional: Python package upgrades -------------------------------------
 # We don't assume a specific venv layout — use whichever `python` is on PATH.
 RUN if [ -n "$PIP_UPGRADES" ]; then \
