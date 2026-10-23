@@ -85,6 +85,36 @@ RUN if [ -n "$PIP_UPGRADES" ]; then \
         echo ">>> No PIP_UPGRADES specified; skipping Python upgrades." ; \
     fi
 
+# ---- Sync pip's VENDORED certifi to the upgraded one -----------------------
+# pip ships its own private copy of certifi under `pip/_vendor/certifi`, used
+# only for TLS verification during `pip install`. Even after we upgrade the
+# real `certifi`, this vendored bundle keeps the OLD cacert.pem — which still
+# trusts the compromised emSign/eMudhra roots — and Trivy reads its version
+# from `pip/_vendor/vendor.txt` (e.g. certifi==2026.6.17, GHSA-6q48-6c7w-9gw2
+# CRITICAL). We faithfully upgrade the vendored copy: overwrite its cacert.pem
+# with the upgraded certifi's bundle and update the recorded version. This both
+# removes the real emSign exposure from pip and clears the Trivy finding.
+# Skipped cleanly if either certifi is not present. Opt out with
+# KEEP_EMSIGN_ROOT (same switch as the system-trust distrust).
+RUN if [ -z "$KEEP_EMSIGN_ROOT" ]; then \
+        real="$(python -c 'import certifi; print(certifi.where())' 2>/dev/null || true)" ; \
+        ver="$(python -c 'import importlib.metadata as m; print(m.version("certifi"))' 2>/dev/null || true)" ; \
+        vend="$(python -c 'import importlib.util,os; s=importlib.util.find_spec("pip._vendor.certifi"); print(os.path.dirname(s.origin) if s and s.origin else "")' 2>/dev/null || true)" ; \
+        if [ -n "$real" ] && [ -n "$vend" ] && [ -f "$real" ] && [ -f "$vend/cacert.pem" ]; then \
+            cp "$real" "$vend/cacert.pem" \
+            && echo ">>> synced pip vendored cacert.pem from $real" ; \
+            vt="$(dirname "$vend")/vendor.txt" ; \
+            if [ -n "$ver" ] && [ -f "$vt" ]; then \
+                sed -i -E "s/^certifi==.*/certifi==$ver/I" "$vt" \
+                && echo ">>> updated pip vendor.txt certifi==$ver" ; \
+            fi ; \
+        else \
+            echo ">>> pip vendored certifi not found; skipping sync." ; \
+        fi ; \
+    else \
+        echo ">>> KEEP_EMSIGN_ROOT set; leaving pip-vendored certifi untouched." ; \
+    fi
+
 # ---- Remove unused openvscode-server language-only extensions --------------
 # The agent-server bundles openvscode-server with built-in language extensions
 # whose `package.json` names collide with vulnerable npm packages (e.g. the
@@ -231,10 +261,18 @@ RUN if [ -f /opt/acp-node/bin/node ] && [ -x /usr/local/bin/node ]; then \
 # The downstream build.sh scan gate (POLICY_MAX_CRITICAL=0) is the backstop:
 # if any of these survive, the build fails there. Opt out with
 # `--build-arg KEEP_BUNDLED_NPM=1`.
+#   shell-quote 1.8.3         CVE-2026-9277   arbitrary code execution via
+#                              command injection (fixed 1.8.4) — bundled as a
+#                              leaf dep inside openvscode-server's node_modules
+#
+# shell-quote is a tiny pure-JS leaf package deduped deep in bundled trees, so
+# we replace every copy in place with the fixed tarball (npm pack just
+# downloads; it does not mutate the surrounding dependency tree).
 ARG KEEP_BUNDLED_NPM=""
 ARG NPM_PIN="12.2.1"
 ARG GEMINI_CLI_PIN="0.39.1"
 ARG PROXY_ADDR_PIN="2.0.8"
+ARG SHELL_QUOTE_PIN="1.8.4"
 RUN if [ -n "$KEEP_BUNDLED_NPM" ]; then \
         echo ">>> KEEP_BUNDLED_NPM set; leaving bundled npm packages untouched." ; \
     else \
@@ -255,6 +293,18 @@ RUN if [ -n "$KEEP_BUNDLED_NPM" ]; then \
             ( cd "$acp_dir" && /opt/acp-node/bin/npm install --no-save --no-audit --no-fund "proxy-addr@${PROXY_ADDR_PIN}" ) \
                 || echo ">>> WARN: proxy-addr refresh did not complete; scan gate will confirm final state." ; \
         fi ; \
+        npm_for_pack="$(command -v npm || echo /usr/local/bin/npm)" ; \
+        for pj in $(find / -path '*/node_modules/shell-quote/package.json' 2>/dev/null); do \
+            d="$(dirname "$pj")" ; \
+            echo ">>> Replacing bundled shell-quote in $d with ${SHELL_QUOTE_PIN} (clears CVE-2026-9277)" ; \
+            tmp="$(mktemp -d)" ; \
+            ( cd "$tmp" && "$npm_for_pack" pack --silent "shell-quote@${SHELL_QUOTE_PIN}" >/dev/null ) \
+            && tar -xzf "$tmp"/shell-quote-*.tgz -C "$tmp" \
+            && rm -rf "$d"/* \
+            && cp -a "$tmp"/package/. "$d"/ \
+            && rm -rf "$tmp" \
+            || { echo "ERROR: failed to replace shell-quote in $d" >&2 ; exit 1 ; } ; \
+        done ; \
         ( /usr/local/bin/npm cache clean --force >/dev/null 2>&1 || true ) ; \
         ( /opt/acp-node/bin/npm cache clean --force >/dev/null 2>&1 || true ) ; \
         rm -rf /root/.npm ; \
