@@ -75,6 +75,36 @@ RUN if [ -z "$KEEP_EMSIGN_ROOT" ]; then \
         echo ">>> KEEP_EMSIGN_ROOT set; leaving emSign roots trusted." ; \
     fi
 
+# ---- Make `uv`'s TLS trust path eMudhra-clear ------------------------------
+# uv does NOT use certifi — it verifies TLS against a copy of `webpki-root-certs`
+# compiled INTO the binary (`/usr/bin/uv`, a standalone musl binary, not a pip
+# package). GHSA-hq85-5cpj-mr62 removed only `emSign ECC Root CA - G3` in uv
+# 0.13.4; the base's uv 0.13.5 is advisory-safe but its vendored bundle STILL
+# embeds the rest of the eMudhra family (emSign ECC Root CA - C3, emSign Root CA
+# - C1 / G1). A `pip install uv==x` does NOT change this binary (and would only
+# shadow it with an equal-or-older pip-packaged uv), so the pin is useless here.
+#
+# The robust fix is `UV_NATIVE_TLS=1`: uv then verifies against the platform
+# trust store (via rustls-platform-verifier) instead of its vendored bundle. We
+# already stripped the ENTIRE emSign family from that OS store above, so uv
+# inherits an eMudhra-clean trust set. Proven: with UV_NATIVE_TLS=1 and an empty
+# OS store, uv fails `UnknownIssuer`; with the cleaned store it succeeds. Set
+# KEEP_EMSIGN_ROOT=1 to opt out (keeps uv on its vendored bundle).
+ENV UV_NATIVE_TLS=1
+RUN if [ -z "$KEEP_EMSIGN_ROOT" ]; then \
+        uvbin="$(command -v uv || true)" ; \
+        if [ -n "$uvbin" ]; then \
+            echo ">>> uv at $uvbin ($("$uvbin" --version 2>/dev/null)) will use native TLS (cleaned OS store)" ; \
+            if grep -qi emSign /etc/ssl/certs/ca-certificates.crt 2>/dev/null; then \
+                echo "ERROR: OS trust bundle still contains emSign; uv native-TLS would trust it" >&2 ; exit 1 ; \
+            fi ; \
+        else \
+            echo ">>> no uv binary present; UV_NATIVE_TLS set for any later uv." ; \
+        fi ; \
+    else \
+        echo ">>> KEEP_EMSIGN_ROOT set; leaving uv on its vendored webpki bundle." ; \
+    fi
+
 # ---- Optional: Python package upgrades -------------------------------------
 # We don't assume a specific venv layout — use whichever `python` is on PATH.
 RUN if [ -n "$PIP_UPGRADES" ]; then \
