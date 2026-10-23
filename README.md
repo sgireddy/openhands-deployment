@@ -661,6 +661,7 @@ docker buildx build \
     --build-arg BASE_IMAGE=docker.io/sgireddy/openhands:custom_base \
     --build-arg PIP_UPGRADES="certifi==2026.10.19 anyio==4.14.2 litellm==1.93.2 pillow==13.0.0 GitPython==3.1.59 PyJWT==2.14.0 jupyter_server==2.20.0 lxml==6.1.0" \
     --build-arg STRIP_VSCODE_BUILD_ARTIFACTS=1 \
+    --build-arg STRIP_OPENSSH=1 \
     --provenance=false \
     --tag <your-registry>/openhands:custom_base-slim \
     --push .
@@ -672,6 +673,14 @@ spoofing, `litellm`, `pillow`, `GitPython`, `PyJWT`, `jupyter_server`).
 `pillow` 12→13 is a major bump — review if you depend on its API. The
 emSign system-root blacklist also runs by default here
 (`--build-arg KEEP_EMSIGN_ROOT=1` to opt out).
+
+`STRIP_OPENSSH=1` purges OpenSSH, which carries the unfixable
+`CVE-2026-60002` (a client-side use-after-free in `ssh` when a server
+swaps its host key during rekey; no Debian fix in any suite). The app
+runs no sshd and clones over HTTPS+token, so this is safe here and is
+what takes the openhands slim image to **0 Critical**. Omit the flag if
+you clone via `git+ssh` from inside the container. `agent-server` does
+not ship OpenSSH, so it needs no equivalent flag.
 
 > **litellm pin — important.** `litellm==1.93.2` is deliberate, not just
 > "latest". `1.107.0` is a **malicious** release (OSV `MAL-2026-2144`,
