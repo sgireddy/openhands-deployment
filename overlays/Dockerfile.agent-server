@@ -91,13 +91,19 @@ RUN if [ -z "$KEEP_EMSIGN_ROOT" ]; then \
 # OS store, uv fails `UnknownIssuer`; with the cleaned store it succeeds. Set
 # KEEP_EMSIGN_ROOT=1 to opt out (keeps uv on its vendored bundle).
 ENV UV_NATIVE_TLS=1
+ARG UV_MIN_VERSION=0.13.4
 RUN if [ -z "$KEEP_EMSIGN_ROOT" ]; then \
         uvbin="$(command -v uv || true)" ; \
         if [ -n "$uvbin" ]; then \
-            echo ">>> uv at $uvbin ($("$uvbin" --version 2>/dev/null)) will use native TLS (cleaned OS store)" ; \
+            uvver="$("$uvbin" --version 2>/dev/null | awk '{print $2}')" ; \
+            echo ">>> uv at $uvbin (version ${uvver:-unknown}) will use native TLS (cleaned OS store)" ; \
             if grep -qi emSign /etc/ssl/certs/ca-certificates.crt 2>/dev/null; then \
                 echo "ERROR: OS trust bundle still contains emSign; uv native-TLS would trust it" >&2 ; exit 1 ; \
             fi ; \
+            if [ -z "$uvver" ] || [ "$(printf '%s\n%s\n' "$UV_MIN_VERSION" "$uvver" | sort -V | head -1)" != "$UV_MIN_VERSION" ]; then \
+                echo "ERROR: base uv is '${uvver:-unknown}' (< $UV_MIN_VERSION); its vendored webpki bundle still trusts the compromised emSign ECC Root CA - G3 (GHSA-hq85-5cpj-mr62). Upgrade the base image's uv to >= $UV_MIN_VERSION." >&2 ; exit 1 ; \
+            fi ; \
+            echo ">>> uv ${uvver} is >= $UV_MIN_VERSION (GHSA-hq85-5cpj-mr62 fixed); native TLS also routes it around the residual emSign family." ; \
         else \
             echo ">>> no uv binary present; UV_NATIVE_TLS set for any later uv." ; \
         fi ; \
