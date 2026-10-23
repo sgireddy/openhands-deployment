@@ -198,6 +198,41 @@ rebuild (fixed versions are in `trixie-security`); the pip ones need the
 
 Re-scan from the registry after rebuild/push to confirm 0C.
 
+## Rebuild on 1.58.0-python base — local Trivy verification (2026-10-22)
+
+Built `overlays/Dockerfile.agent-server` against
+`ghcr.io/openhands/agent-server:1.58.0-python` (Debian **13.7**), linux/arm64,
+`--load` for local scan, with `STRIP_BROWSER_TOOLS=1 STRIP_DIND=1` and
+`PIP_UPGRADES="certifi==2026.10.19 uv==0.13.4 anyio==4.14.2 litellm==1.93.2"`.
+
+Trivy CRITICAL went 4 → 2 after the overlay fixes. Remaining 2 are both
+`linux-libc-dev` kernel-header CVEs (accepted — see the emSign section above).
+
+Fixes that cleared the others (all now in the overlays):
+- **shell-quote** — the bundled copy in
+  `/openhands/.openvscode-server/node_modules/shell-quote` was 1.8.3
+  (`CVE-2026-9277` ACE). 1.8.4 was ALSO vulnerable (`CVE-2026-102422`), so we
+  pin **1.12.0** (latest, 0 OSV advisories) and replace every bundled copy via
+  `npm pack` (download-only; doesn't disturb the dep tree).
+- **certifi / emSign** — three separate carriers had to be fixed, in this
+  order of discovery:
+  1. top-level `certifi/cacert.pem` — upgraded to 2026.10.19 AND stripped of
+     the 3 residual eMudhra roots.
+  2. pip's **vendored** certifi (`pip/_vendor/certifi/`) — replaced from the
+     stripped top-level; `__init__.py __version__` + `vendor.txt` rewritten.
+  3. pip's **CycloneDX SBOM** (`pip/_vendor/bom.cdx.json`) — Trivy reads this
+     in preference to the files and kept reporting 2026.6.17; the
+     `fix-pip-sbom-certifi.py` helper rewrites the certifi component.
+
+Verified in the built image: OS trust store has no emSign; `certifi.where()`
+and the pip-vendored cacert both have 0 emSign records; installed versions
+certifi 2026.10.19, litellm 1.93.2, anyio 4.14.2, uv 0.13.4, shell-quote
+1.12.0.
+
+Still TODO: run the same build for the **openhands** overlay (the certifi
+steps are mirrored there but not yet scanned), then the multi-arch
+`--push` + registry re-scan.
+
 ## Base-image currency + litellm supply-chain (2026-10-22)
 
 Target the newest published bases:
