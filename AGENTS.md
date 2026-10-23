@@ -108,14 +108,20 @@ removing one does NOT cover the others:
    `emSign ECC Root CA - G3` in `ca-certificates 20260816+nmu1`
    (bug #1151413, NMU 2026-10-20) but that upload only reached
    `sid`/`forky`. `trixie` (20250419) and `bookworm` (20230311+deb12u1)
-   still trust it, so `apt-get upgrade` alone does NOT remove it. The
-   overlays now blacklist it explicitly (prefix the
-   `mozilla/emSign_ECC_Root_CA_-_G3.crt` line in
-   `/etc/ca-certificates.conf` with `!`, then
-   `update-ca-certificates --fresh`). Default-on; opt out with
+   still trust it, so `apt-get upgrade` alone does NOT remove it.
+   **IMPORTANT: emSign is a FAMILY of roots, not just G3.** trixie
+   `ca-certificates 20250419` ships FOUR emSign roots:
+   `emSign_ECC_Root_CA_-_C3`, `emSign_ECC_Root_CA_-_G3`,
+   `emSign_Root_CA_-_C1`, `emSign_Root_CA_-_G1`. The first overlay version
+   only blacklisted G3 and the build-guard (correctly) FAILED because the
+   other three survived in `/etc/ssl/certs`. The overlays now blacklist
+   **every** `mozilla/emSign*` line (prefix with `!`, case-insensitive,
+   then `update-ca-certificates --fresh`). Default-on; opt out with
    `--build-arg KEEP_EMSIGN_ROOT=1` once stable backports the distrust.
-   The overlay step self-verifies and fails the build if the entry name
-   changed upstream or an emSign link survives in `/etc/ssl/certs`.
+   The overlay step self-verifies and fails the build if NO emSign entry
+   is found (upstream rename) or if ANY emSign link survives in
+   `/etc/ssl/certs`. (This fail-closed guard is what caught the G3-only
+   gap on the 1.58.0-python base — keep it.)
 2. **Python `certifi`** (`GHSA-6q48-6c7w-9gw2`) — bundles its own CA
    pem. Fixed in `certifi 2026.10.19`. Bump via `PIP_UPGRADES_*`.
 3. **`uv`** (`GHSA-hq85-5cpj-mr62`) — vendors a webpki root set that
