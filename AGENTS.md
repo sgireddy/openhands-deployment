@@ -166,6 +166,14 @@ removing one does NOT cover the others:
      Proven on 1.58.1-python: `UV_NATIVE_TLS=1` + empty cert file/dir →
      `invalid peer certificate: UnknownIssuer`; + cleaned store (0 emSign) →
      success. The overlay guards the build if the OS bundle still has emSign.
+   - **Defense-in-depth assertion:** the overlay also fails the build if the
+     base's uv is `< ARG UV_MIN_VERSION` (default `0.13.4`) — the uncompromised
+     floor from GHSA-hq85-5cpj-mr62 — so a future base regression is caught
+     loudly even though native TLS already neutralizes the trust path. Uses
+     `sort -V` so `0.13.10 >= 0.13.4` compares correctly. Base is currently uv
+     0.13.5 (also the latest on PyPI), so the assertion passes. We do NOT pin uv
+     via pip (that can't move the standalone `/usr/bin/uv` binary and would only
+     shadow it with an older pip-packaged uv).
    - `openhands` has **no uv binary**, so this only applies to `agent-server`.
 
 ### eMudhra/emSign validation matrix (pip / uv / certifi)
