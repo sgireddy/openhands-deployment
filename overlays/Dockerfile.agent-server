@@ -116,48 +116,45 @@ RUN if [ -n "$PIP_UPGRADES" ]; then \
     fi
 
 # ---- Make the Python TLS trust path eMudhra-clear --------------------------
-# IMPORTANT: upgrading `certifi` to 2026.10.19 is NOT sufficient on its own.
-# That release (GHSA-6q48-6c7w-9gw2) removes only the single compromised root
-# "emSign ECC Root CA - G3" but STILL ships three other eMudhra-operated roots
-# (emSign Root CA - G1 / C1, emSign ECC Root CA - C3). Trivy stops flagging the
-# package, but every Python HTTPS client that uses certifi (litellm, requests,
-# httpx, pip, ...) would keep trusting eMudhra. We distrust the WHOLE emSign
-# family in the OS store, so we do the same here for consistency.
+# Two things matter for certifi, and they are separate:
+#   (a) the recorded VERSION that scanners (Trivy) read, and
+#   (b) the actual CA bundle (`cacert.pem`) contents that TLS clients trust.
 #
-# strip-emsign-certifi.py removes every emSign/eMudhra record from a cacert.pem
-# (idempotent; fails if any marker survives). We apply it to:
-#   1. the top-level `certifi` bundle (used by the agent's Python at runtime),
-#   2. pip's VENDORED certifi (pip/_vendor/certifi, used for pip's own TLS).
-# We also overwrite pip's vendored copy with the upgraded top-level files so its
-# recorded version (pip/_vendor/certifi/__init__.py + vendor.txt — both read by
-# Trivy) moves off the flagged 2026.6.17. Opt out with KEEP_EMSIGN_ROOT.
+# For (a) we rely on UPSTREAM fixed versions rather than hand-editing metadata:
+#   - top-level `certifi`: pinned to 2026.10.19 via PIP_UPGRADES.
+#   - pip's VENDORED certifi (pip/_vendor/certifi, used for pip's own TLS):
+#     pip >= 26.2.2 already vendors certifi 2026.10.19 with consistent
+#     __version__ + vendor.txt + bom.cdx.json, so Trivy sees it as fixed. We do
+#     NOT copy/rewrite those files anymore; instead PIP_UPGRADES carries
+#     `pip==26.2.2` and the guard below fails the build if the vendored certifi
+#     is still older than 2026.10.19 (tells you to bump pip).
+#
+# For (b): even certifi 2026.10.19 only drops the ONE compromised root
+# "emSign ECC Root CA - G3" (GHSA-6q48-6c7w-9gw2) and STILL ships three other
+# eMudhra roots (emSign Root CA - G1 / C1, emSign ECC Root CA - C3). No certifi
+# version removes those, so `strip-emsign-certifi.py` strips the WHOLE emSign
+# family from each cacert.pem (top-level + vendored), matching the OS-store
+# distrust. This changes only cacert contents, not the version metadata.
+# Opt out of everything with KEEP_EMSIGN_ROOT.
 COPY overlays/strip-emsign-certifi.py /usr/local/share/strip-emsign-certifi.py
-COPY overlays/fix-pip-sbom-certifi.py /usr/local/share/fix-pip-sbom-certifi.py
 RUN if [ -z "$KEEP_EMSIGN_ROOT" ]; then \
+        min="2026.10.19" ; \
         realdir="$(python -c 'import os,certifi; print(os.path.dirname(certifi.__file__))' 2>/dev/null || true)" ; \
-        ver="$(python -c 'import importlib.metadata as m; print(m.version("certifi"))' 2>/dev/null || true)" ; \
-        vend="$(python -c 'import importlib.util,os; s=importlib.util.find_spec("pip._vendor.certifi"); print(os.path.dirname(s.origin) if s and s.origin else "")' 2>/dev/null || true)" ; \
         if [ -n "$realdir" ] && [ -d "$realdir" ]; then \
             python /usr/local/share/strip-emsign-certifi.py "$realdir/cacert.pem" ; \
-            if [ -n "$vend" ] && [ -d "$vend" ]; then \
-                cp -a "$realdir"/. "$vend"/ \
-                && rm -rf "$vend/__pycache__" \
-                && echo ">>> replaced pip vendored certifi from $realdir (now $ver, incl stripped cacert.pem + __version__)" ; \
-                vt="$(dirname "$vend")/vendor.txt" ; \
-                if [ -n "$ver" ] && [ -f "$vt" ]; then \
-                    sed -i -E "s/^([[:space:]]*)certifi==.*/\1certifi==$ver/I" "$vt" \
-                    && echo ">>> updated pip vendor.txt certifi==$ver" ; \
-                fi ; \
-                sbom="$(dirname "$vend")/bom.cdx.json" ; \
-                if [ -n "$ver" ] && [ -f "$sbom" ]; then \
-                    python /usr/local/share/fix-pip-sbom-certifi.py "$sbom" "$ver" ; \
-                fi ; \
-                python /usr/local/share/strip-emsign-certifi.py "$vend/cacert.pem" ; \
-            else \
-                echo ">>> pip has no vendored certifi; stripped top-level only." ; \
-            fi ; \
         else \
-            echo ">>> no top-level certifi found; skipping eMudhra strip." ; \
+            echo ">>> no top-level certifi found; skipping its eMudhra strip." ; \
+        fi ; \
+        vend="$(python -c 'import importlib.util,os; s=importlib.util.find_spec("pip._vendor.certifi"); print(os.path.dirname(s.origin) if s and s.origin else "")' 2>/dev/null || true)" ; \
+        if [ -n "$vend" ] && [ -d "$vend" ]; then \
+            vv="$(python -c 'import pip._vendor.certifi as c; print(getattr(c,"__version__",""))' 2>/dev/null || true)" ; \
+            if [ -z "$vv" ] || [ "$(printf '%s\n%s\n' "$min" "$vv" | sort -V | head -1)" != "$min" ]; then \
+                echo "ERROR: pip-vendored certifi is '${vv:-unknown}' (< $min); add 'pip==26.2.2' (or newer) to PIP_UPGRADES so pip vendors a fixed certifi" >&2 ; exit 1 ; \
+            fi ; \
+            python /usr/local/share/strip-emsign-certifi.py "$vend/cacert.pem" ; \
+            echo ">>> pip-vendored certifi $vv is fixed (>= $min); emSign family stripped from its cacert." ; \
+        else \
+            echo ">>> pip has no vendored certifi; nothing to do for pip." ; \
         fi ; \
     else \
         echo ">>> KEEP_EMSIGN_ROOT set; leaving certifi trust bundles untouched." ; \

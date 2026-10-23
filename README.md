@@ -581,7 +581,7 @@ docker buildx build \
     --file overlays/Dockerfile.agent-server \
     --platform linux/amd64,linux/arm64 \
     --build-arg BASE_IMAGE=ghcr.io/openhands/agent-server:1.58.1-python \
-    --build-arg PIP_UPGRADES="certifi==2026.10.19 anyio==4.14.2 litellm==1.93.2" \
+    --build-arg PIP_UPGRADES="pip==26.2.2 certifi==2026.10.19 anyio==4.14.2 litellm==1.93.2" \
     --build-arg STRIP_BROWSER_TOOLS=1 \
     --build-arg STRIP_DIND=1 \
     --provenance=false \
@@ -659,7 +659,7 @@ docker buildx build \
     --file overlays/Dockerfile.openhands \
     --platform linux/amd64,linux/arm64 \
     --build-arg BASE_IMAGE=docker.io/sgireddy/openhands:custom_base \
-    --build-arg PIP_UPGRADES="certifi==2026.10.19 anyio==4.14.2 litellm==1.93.2 pillow==13.0.0 GitPython==3.1.59 PyJWT==2.14.0 jupyter_server==2.20.0 lxml==6.1.0" \
+    --build-arg PIP_UPGRADES="pip==26.2.2 certifi==2026.10.19 anyio==4.14.2 litellm==1.93.2 pillow==13.0.0 GitPython==3.1.59 PyJWT==2.14.0 jupyter_server==2.20.0 lxml==6.1.0" \
     --build-arg STRIP_VSCODE_BUILD_ARTIFACTS=1 \
     --build-arg STRIP_OPENSSH=1 \
     --provenance=false \

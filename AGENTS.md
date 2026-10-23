@@ -135,10 +135,19 @@ removing one does NOT cover the others:
    OS-store distrust. The emSign-residue guard in the overlay step fails the
    build if any eMudhra marker survives. Pin certifi via `PIP_UPGRADES_*`.
    NOTE: pip's **vendored** certifi is a SEPARATE copy Trivy reports by the
-   version in `pip/_vendor/certifi/__init__.py` (`__version__`) and
-   `pip/_vendor/vendor.txt` (watch the leading whitespace on that line); the
-   overlay replaces the whole vendored dir from the upgraded top-level and
-   rewrites both markers.
+   version in `pip/_vendor/certifi/__init__.py` (`__version__`),
+   `pip/_vendor/vendor.txt`, and `pip/_vendor/bom.cdx.json`.
+   **Simplified approach (2026-10-23):** rather than hand-replacing the vendored
+   dir + rewriting those three markers, we rely on a FIXED pip. `pip==26.2.2`
+   already vendors certifi 2026.10.19 with all three markers consistent, so
+   Trivy is clean with zero file surgery. We just (a) carry `pip==26.2.2` in
+   `PIP_UPGRADES_*`, and (b) strip the residual non-G3 emSign family from the
+   vendored `cacert.pem` (contents only; version metadata untouched). The
+   overlay fails the build if the vendored certifi version is still `< 2026.10.19`
+   (tells you to bump pip). The old `fix-pip-sbom-certifi.py` + cp-replace +
+   `vendor.txt` sed are **removed**. Agent-server's base pip is already 26.2.2;
+   the openhands app base ships pip 26.0.1 (vendored certifi 2026.01.04) so the
+   pip bump is REQUIRED there.
 3. **`uv`** (`GHSA-hq85-5cpj-mr62`) — vendors a `webpki-root-certs` bundle
    **compiled into the binary** (NOT certifi). Fixed in `uv 0.13.4`, BUT, like
    certifi, that only dropped `emSign ECC Root CA - G3`; uv's bundle still
@@ -164,7 +173,7 @@ removing one does NOT cover the others:
 | Component | Trusts eMudhra via | Advisory | Affected | Advisory-"safe" | Still family-dirty at "safe"? | How we make it eMudhra-CLEAN |
 |-----------|--------------------|----------|----------|-----------------|-------------------------------|------------------------------|
 | **certifi** | own `cacert.pem` | GHSA-6q48-6c7w-9gw2 (PYSEC-2026-4320) | `>=2019.03.09, <2026.10.19` | `2026.10.19` | **Yes** — keeps emSign G1/C1/ECC-C3 | pin `2026.10.19` + `strip-emsign-certifi.py` removes the whole family from `cacert.pem` |
-| **pip** | its **vendored** certifi (`pip/_vendor/certifi`) + `bom.cdx.json` SBOM | *(no pip-specific CVE; inherits certifi's)* | pip whose vendored certifi `<2026.10.19` | pip with vendored certifi `>=2026.10.19` | **Yes** — same G1/C1/ECC-C3 remain | overlay replaces vendored certifi from the stripped top-level, rewrites `vendor.txt` + SBOM (`fix-pip-sbom-certifi.py`) |
+| **pip** | its **vendored** certifi (`pip/_vendor/certifi`) + `bom.cdx.json` SBOM | *(no pip-specific CVE; inherits certifi's)* | pip whose vendored certifi `<2026.10.19` (e.g. pip 26.0.1 → 2026.01.04) | **pip 26.2.2** (vendors certifi 2026.10.19, all markers consistent) | **Yes** — same G1/C1/ECC-C3 remain | pin `pip==26.2.2` in `PIP_UPGRADES_*` (fixes the version with no file surgery) + strip the emSign family from the vendored `cacert.pem` |
 | **uv** | `webpki-root-certs` **compiled into `/usr/bin/uv`** | GHSA-hq85-5cpj-mr62 (PYSEC-2026-4321) | `<0.13.4` | `0.13.4` | **Yes** — keeps emSign C3/C1/G1 | `ENV UV_NATIVE_TLS=1` → uv uses the cleaned OS trust store, bypassing the vendored bundle |
 
 Bottom line: **the published "safe" versions (certifi 2026.10.19, uv 0.13.4) are
@@ -243,20 +252,26 @@ Fixes that cleared the others (all now in the overlays):
   (`CVE-2026-9277` ACE). 1.8.4 was ALSO vulnerable (`CVE-2026-102422`), so we
   pin **1.12.0** (latest, 0 OSV advisories) and replace every bundled copy via
   `npm pack` (download-only; doesn't disturb the dep tree).
-- **certifi / emSign** — three separate carriers had to be fixed, in this
-  order of discovery:
-  1. top-level `certifi/cacert.pem` — upgraded to 2026.10.19 AND stripped of
-     the 3 residual eMudhra roots.
-  2. pip's **vendored** certifi (`pip/_vendor/certifi/`) — replaced from the
-     stripped top-level; `__init__.py __version__` + `vendor.txt` rewritten.
-  3. pip's **CycloneDX SBOM** (`pip/_vendor/bom.cdx.json`) — Trivy reads this
-     in preference to the files and kept reporting 2026.6.17; the
-     `fix-pip-sbom-certifi.py` helper rewrites the certifi component.
+- **certifi / emSign** — version and bundle-contents are separate problems.
+  History (what we first built) then the simplified current approach:
+  - FIRST approach (now removed): hand-fix all three pip-vendored markers —
+    `pip/_vendor/certifi/__init__.py` `__version__`, `pip/_vendor/vendor.txt`,
+    and `pip/_vendor/bom.cdx.json` (Trivy reads the SBOM in preference and kept
+    reporting the old 2026.6.17) — via a cp-replace + sed + `fix-pip-sbom-certifi.py`.
+  - CURRENT approach (2026-10-23): rely on a FIXED pip for the VERSION, then
+    only strip the bundle CONTENTS:
+    1. top-level `certifi` — pin `2026.10.19` via PIP_UPGRADES + strip the 3
+       residual eMudhra roots from its `cacert.pem`.
+    2. pip's vendored certifi — pin `pip==26.2.2` (vendors certifi 2026.10.19
+       with consistent `__version__`/`vendor.txt`/`bom.cdx.json`, so Trivy is
+       clean with no file surgery) + strip the emSign family from its
+       `cacert.pem`. Build fails if the vendored certifi is still `< 2026.10.19`.
+    `fix-pip-sbom-certifi.py` and the cp-replace/sed are gone.
 
-Verified in the built image: OS trust store has no emSign; `certifi.where()`
+Verified in the built images: OS trust store has no emSign; `certifi.where()`
 and the pip-vendored cacert both have 0 emSign records; installed versions
-certifi 2026.10.19, litellm 1.93.2, anyio 4.14.2, uv 0.13.4, shell-quote
-1.12.0.
+certifi 2026.10.19, litellm 1.93.2, anyio 4.14.2, shell-quote 1.12.0;
+pip 26.2.2 (vendored certifi 2026.10.19); uv 0.13.5 on native TLS.
 
 ## openhands slim overlay — local Trivy verification (2026-10-23)
 
