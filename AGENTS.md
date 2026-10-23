@@ -14,6 +14,35 @@ top of an upstream maintainer-published base, then is scanned by Scout
 or Trivy. Output images are tagged `:custom_base` and pushed to
 `docker.io/sgireddy/{openhands,agent-server}`.
 
+## Latest published hardened slim set (2026-10-23, multi-arch amd64+arm64)
+
+Built via the Apple-Silicon Mac's `ohpush` docker-container buildx builder
+(DOCKER_CONFIG=$HOME/.docker-ssh), `--provenance=false`. Registry Trivy
+re-scan BY DIGEST (see cache gotcha below):
+
+| Tag | Manifest list | amd64 | arm64 | CRITICAL/arch |
+|-----|---------------|-------|-------|---------------|
+| `agent-server:custom_base-slim` (+`-1.58.1`) | `fdef4615e097…` | `8e9dc1327b2d…` | `412bb202e347…` | 1 (linux-libc-dev CVE-2026-93221, no fix, accepted) |
+| `openhands:custom_base-slim` | `40309da22f83…` | `6833f637c977…` | `b906d37d6bb4…` | **0** |
+
+Both are eMudhra-clean (OS store + certifi top/vendored stripped; agent-server
+uv on UV_NATIVE_TLS). openhands slim has OpenSSH purged (CVE-2026-60002).
+NOT yet rebuilt/pushed multi-arch: the *regular* (non-slim) `custom_base`
+tags, and the openhands regular base needs a source-built `openhands:latest`
+(0.x fork) which isn't present — deferred, pending the 1.x base-sourcing call.
+
+### Trivy cache gotcha (cost us a scare on this push)
+
+`trivy image <tag>` served a STALE result for
+`sgireddy/agent-server:custom_base-slim` — reporting 30 Criticals with the
+OLD `1.19.1`-era digest's versions (certifi 2026.2.25, uv 0.11.5, anyio
+4.13.0, perl 5.40.1-6, linux-libc-dev 6.12.85). dpkg ground truth inside the
+freshly pushed image proved it clean+patched (perl 5.40.1-6+deb13u1, gnutls
++deb13u4, linux-libc-dev 6.12.113, certifi 2026.10.19, uv 0.13.5). Fix:
+`trivy clean --all` then **scan BY DIGEST**, not by tag. Always verify a
+suspicious Trivy result against `dpkg-query -W` / on-disk versions before
+believing it.
+
 ## Build / scan / push topology
 
 The repo is developed on **two Macs** but **only the Intel Mac has a
