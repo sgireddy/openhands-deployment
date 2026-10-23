@@ -40,6 +40,36 @@ RUN apt-get update -y \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
+# ---- Optional: remove OpenSSH (unfixable client-side CVE-2026-60002) --------
+# The base ships openssh 1:10.0p1-* (client/server/sftp-server/ssh). It carries
+# CVE-2026-60002 — a use-after-free in the `ssh` CLIENT when a malicious server
+# swaps its host key during a key re-exchange (client-side only, pre-OpenSSH
+# 10.4). Debian has NO fixed version in any suite, so `apt-get upgrade` can't
+# clear it and it shows as 4 Criticals (one per openssh sub-package).
+#
+# The openhands web/orchestration image does not run an sshd, and git in this
+# deployment uses HTTPS + a token (git only *Recommends* ssh-client, it does
+# not depend on it), so OpenSSH is an unused component here. Per the repo's
+# "remove the component that carries the CVE rather than ignore it" policy, we
+# purge it when STRIP_OPENSSH is set. The purge removes only the four openssh
+# packages (verified: no cascade to git/libssl). Leave STRIP_OPENSSH empty to
+# keep OpenSSH (e.g. if you clone via git+ssh from inside the container).
+ARG STRIP_OPENSSH=""
+RUN if [ -n "$STRIP_OPENSSH" ]; then \
+        echo ">>> Purging OpenSSH (unfixable client-side CVE-2026-60002)" \
+        && apt-get update -y \
+        && apt-get -y purge openssh-client openssh-server openssh-sftp-server ssh 2>/dev/null || true ; \
+        apt-get -y autoremove --purge \
+        && apt-get clean \
+        && rm -rf /var/lib/apt/lists/* ; \
+        if dpkg -l 2>/dev/null | grep -qE '^ii\s+(openssh-client|openssh-server|openssh-sftp-server|ssh)\s'; then \
+            echo "ERROR: openssh packages still present after purge" >&2 ; exit 1 ; \
+        fi ; \
+        echo ">>> OpenSSH removed." ; \
+    else \
+        echo ">>> Keeping OpenSSH (set STRIP_OPENSSH=1 to remove CVE-2026-60002)." ; \
+    fi
+
 # ---- Distrust the emSign (eMudhra) roots -----------------------------------
 # Debian blacklisted "emSign ECC Root CA - G3" in ca-certificates
 # 20260816+nmu1 (bug #1151413, NMU 2026-10-20), but that upload only reached
