@@ -104,6 +104,7 @@ RUN if [ -n "$PIP_UPGRADES" ]; then \
 # stripped top-level files so its recorded version (read by Trivy) moves off the
 # flagged 2026.6.17. Opt out with KEEP_EMSIGN_ROOT.
 COPY overlays/strip-emsign-certifi.py /usr/local/share/strip-emsign-certifi.py
+COPY overlays/fix-pip-sbom-certifi.py /usr/local/share/fix-pip-sbom-certifi.py
 RUN if [ -z "$KEEP_EMSIGN_ROOT" ]; then \
         realdir="$(python -c 'import os,certifi; print(os.path.dirname(certifi.__file__))' 2>/dev/null || true)" ; \
         ver="$(python -c 'import importlib.metadata as m; print(m.version("certifi"))' 2>/dev/null || true)" ; \
@@ -118,6 +119,10 @@ RUN if [ -z "$KEEP_EMSIGN_ROOT" ]; then \
                 if [ -n "$ver" ] && [ -f "$vt" ]; then \
                     sed -i -E "s/^([[:space:]]*)certifi==.*/\1certifi==$ver/I" "$vt" \
                     && echo ">>> updated pip vendor.txt certifi==$ver" ; \
+                fi ; \
+                sbom="$(dirname "$vend")/bom.cdx.json" ; \
+                if [ -n "$ver" ] && [ -f "$sbom" ]; then \
+                    python /usr/local/share/fix-pip-sbom-certifi.py "$sbom" "$ver" ; \
                 fi ; \
                 python /usr/local/share/strip-emsign-certifi.py "$vend/cacert.pem" ; \
             else \
