@@ -229,9 +229,42 @@ and the pip-vendored cacert both have 0 emSign records; installed versions
 certifi 2026.10.19, litellm 1.93.2, anyio 4.14.2, uv 0.13.4, shell-quote
 1.12.0.
 
-Still TODO: run the same build for the **openhands** overlay (the certifi
-steps are mirrored there but not yet scanned), then the multi-arch
-`--push` + registry re-scan.
+## openhands slim overlay — local Trivy verification (2026-10-23)
+
+Built `overlays/Dockerfile.openhands` on top of local `openhands:custom_base`
+(the documented slim-on-custom_base pattern), linux/arm64, `--load`, with
+`STRIP_VSCODE_BUILD_ARTIFACTS=1`, the new `STRIP_OPENSSH=1`, and
+`PIP_UPGRADES="certifi==2026.10.19 anyio==4.14.2 litellm==1.93.2 pillow==13.0.0
+GitPython==3.1.59 PyJWT==2.14.0 jupyter_server==2.20.0 lxml==6.1.0"`.
+
+Result: **Trivy CRITICAL = 0** (HIGH 153 → 130). Verified in-image: OS trust
+store has no emSign; `/app/.venv` certifi cacert 0 emSign, certifi 2026.10.19,
+litellm 1.93.2, anyio 4.14.2, pillow 13.0.0, lxml 6.1.0; no openssh packages.
+
+The certifi/emSign overlay steps run as the **openhands** user and correctly
+target the `/app/.venv` venv (stripped 3 eMudhra roots from the top-level
+cacert, synced the pip-vendored copy). Confirms the mirrored fixes work in the
+app image's venv layout.
+
+### OpenSSH `CVE-2026-60002` (client-side, unfixable) — removed via STRIP_OPENSSH
+
+The openhands base ships openssh 1:10.0p1-* (client/server/sftp-server/ssh).
+`CVE-2026-60002` is a use-after-free in the `ssh` **client** when a server
+swaps its host key during a key re-exchange (pre-OpenSSH 10.4, client-side
+only). Debian has **no fix in any suite**, so it shows as 4 Criticals (one per
+openssh sub-package). The app runs no sshd and uses git over HTTPS+token (git
+only *Recommends* ssh-client, does not depend on it), so OpenSSH is unused.
+
+`overlays/Dockerfile.openhands` now has an opt-in `STRIP_OPENSSH` build-arg that
+purges all four openssh packages (verified: no cascade to git/libssl) with a
+fail-closed post-purge dpkg check. Default OFF (keeps git+ssh). Enabling it is
+what takes the openhands slim to 0 Critical. agent-server does NOT ship openssh,
+so no equivalent flag is needed there.
+
+Still TODO: the multi-arch `--push` of both images + registry re-scan. For a
+fully current openhands app, note the local base is the **0.x** source fork
+(`~/projects/OpenHands`, describe `0.22.0-...`), not the new 1.x SDK app — the
+1.x app is distributed differently and is a separate base-sourcing decision.
 
 ## Base-image currency + litellm supply-chain (2026-10-22)
 
