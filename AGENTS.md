@@ -123,7 +123,22 @@ removing one does NOT cover the others:
    `/etc/ssl/certs`. (This fail-closed guard is what caught the G3-only
    gap on the 1.58.0-python base — keep it.)
 2. **Python `certifi`** (`GHSA-6q48-6c7w-9gw2`) — bundles its own CA
-   pem. Fixed in `certifi 2026.10.19`. Bump via `PIP_UPGRADES_*`.
+   pem. **Bumping to `certifi 2026.10.19` is necessary but NOT sufficient.**
+   That release removes only the ONE compromised root
+   (`emSign ECC Root CA - G3`); it STILL ships three other eMudhra roots
+   (`emSign Root CA - G1`, `emSign Root CA - C1`,
+   `emSign ECC Root CA - C3`). Trivy stops flagging the package (the CVE'd
+   root is gone) but the Python TLS path (litellm/requests/httpx/pip) would
+   keep trusting eMudhra. The overlays run `overlays/strip-emsign-certifi.py`
+   on BOTH the top-level `certifi/cacert.pem` AND pip's vendored
+   `pip/_vendor/certifi/cacert.pem` to remove the whole family — matching the
+   OS-store distrust. The emSign-residue guard in the overlay step fails the
+   build if any eMudhra marker survives. Pin certifi via `PIP_UPGRADES_*`.
+   NOTE: pip's **vendored** certifi is a SEPARATE copy Trivy reports by the
+   version in `pip/_vendor/certifi/__init__.py` (`__version__`) and
+   `pip/_vendor/vendor.txt` (watch the leading whitespace on that line); the
+   overlay replaces the whole vendored dir from the upgraded top-level and
+   rewrites both markers.
 3. **`uv`** (`GHSA-hq85-5cpj-mr62`) — vendors a webpki root set that
    trusts the emSign root. Fixed in `uv 0.13.4`. If `uv` is a standalone
    binary rather than a venv dep, the pip bump may not move it — then
@@ -131,6 +146,27 @@ removing one does NOT cover the others:
 
 Related TLS-cert bug bundled alongside: `anyio` `CVE-2026-63374` (TLS
 certificate spoofing via IDNA) — fixed in `anyio 4.14.2`.
+
+### `linux-libc-dev` kernel-header CVEs (accepted, not runtime-applicable)
+
+Trivy flags two Criticals on the `linux-libc-dev` package in the
+agent-server (1.58.0-python base, Debian 13.7):
+
+- `CVE-2026-93221` — **no fix available** in any suite.
+- `CVE-2026-98805` — fixed in `6.12.113-1`, but that version is **not in
+  the base image's pinned apt snapshot** (`snapshot.debian.org/.../
+  20261004T000000Z`); the newest candidate there is `6.12.111-1`, so
+  `apt-get upgrade` cannot pull it. (Confirmed via `apt-cache policy`.)
+
+`linux-libc-dev` is **kernel headers only** — there is no running kernel in
+the image; containers use the host kernel. These kernel CVEs are therefore
+not exploitable through the headers package at runtime. We accept them and
+do NOT purge the package by default, because removing it cascades to
+`libc6-dev`/the C toolchain (`libc6-dev depends on linux-libc-dev`), which
+the sandbox may need to build C-extension wheels at runtime. If a literal
+`Critical=0` Trivy number is required, the user can opt into a toolchain
+strip, accepting the loss of in-sandbox compilation. Scout/Trivy will keep
+listing these until Debian backports `6.12.113-1` into the pinned snapshot.
 
 ## Trivy CRITICAL review snapshot (2026-10-22)
 
