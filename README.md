@@ -580,13 +580,13 @@ build the slim variant with both strips on:
 docker buildx build \
     --file overlays/Dockerfile.agent-server \
     --platform linux/amd64,linux/arm64 \
-    --build-arg BASE_IMAGE=ghcr.io/openhands/agent-server:1.58.0-python \
+    --build-arg BASE_IMAGE=ghcr.io/openhands/agent-server:1.58.1-python \
     --build-arg PIP_UPGRADES="certifi==2026.10.19 uv==0.13.4 anyio==4.14.2 litellm==1.93.2" \
     --build-arg STRIP_BROWSER_TOOLS=1 \
     --build-arg STRIP_DIND=1 \
     --provenance=false \
     --tag <your-registry>/agent-server:custom_base-slim \
-    --tag <your-registry>/agent-server:custom_base-slim-1.58.0 \
+    --tag <your-registry>/agent-server:custom_base-slim-1.58.1 \
     --push .
 ```
 
