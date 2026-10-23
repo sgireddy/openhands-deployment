@@ -97,16 +97,21 @@ RUN if [ -n "$PIP_UPGRADES" ]; then \
 # Skipped cleanly if either certifi is not present. Opt out with
 # KEEP_EMSIGN_ROOT (same switch as the system-trust distrust).
 RUN if [ -z "$KEEP_EMSIGN_ROOT" ]; then \
-        real="$(python -c 'import certifi; print(certifi.where())' 2>/dev/null || true)" ; \
+        realdir="$(python -c 'import os,certifi; print(os.path.dirname(certifi.__file__))' 2>/dev/null || true)" ; \
         ver="$(python -c 'import importlib.metadata as m; print(m.version("certifi"))' 2>/dev/null || true)" ; \
         vend="$(python -c 'import importlib.util,os; s=importlib.util.find_spec("pip._vendor.certifi"); print(os.path.dirname(s.origin) if s and s.origin else "")' 2>/dev/null || true)" ; \
-        if [ -n "$real" ] && [ -n "$vend" ] && [ -f "$real" ] && [ -f "$vend/cacert.pem" ]; then \
-            cp "$real" "$vend/cacert.pem" \
-            && echo ">>> synced pip vendored cacert.pem from $real" ; \
+        if [ -n "$realdir" ] && [ -n "$vend" ] && [ -d "$realdir" ] && [ -d "$vend" ]; then \
+            cp -a "$realdir"/. "$vend"/ \
+            && rm -rf "$vend/__pycache__" \
+            && echo ">>> replaced pip vendored certifi from $realdir (now $ver, incl cacert.pem + __version__)" ; \
             vt="$(dirname "$vend")/vendor.txt" ; \
             if [ -n "$ver" ] && [ -f "$vt" ]; then \
-                sed -i -E "s/^certifi==.*/certifi==$ver/I" "$vt" \
+                sed -i -E "s/^([[:space:]]*)certifi==.*/\1certifi==$ver/I" "$vt" \
                 && echo ">>> updated pip vendor.txt certifi==$ver" ; \
+            fi ; \
+            resid="$(grep -ri 'emSign' "$vend"/cacert.pem 2>/dev/null | head -1 || true)" ; \
+            if [ -n "$resid" ]; then \
+                echo "ERROR: emSign still present in pip vendored cacert.pem" >&2 ; exit 1 ; \
             fi ; \
         else \
             echo ">>> pip vendored certifi not found; skipping sync." ; \
@@ -272,7 +277,7 @@ ARG KEEP_BUNDLED_NPM=""
 ARG NPM_PIN="12.2.1"
 ARG GEMINI_CLI_PIN="0.39.1"
 ARG PROXY_ADDR_PIN="2.0.8"
-ARG SHELL_QUOTE_PIN="1.8.4"
+ARG SHELL_QUOTE_PIN="1.12.0"
 RUN if [ -n "$KEEP_BUNDLED_NPM" ]; then \
         echo ">>> KEEP_BUNDLED_NPM set; leaving bundled npm packages untouched." ; \
     else \
