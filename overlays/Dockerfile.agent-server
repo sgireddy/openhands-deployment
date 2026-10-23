@@ -85,39 +85,47 @@ RUN if [ -n "$PIP_UPGRADES" ]; then \
         echo ">>> No PIP_UPGRADES specified; skipping Python upgrades." ; \
     fi
 
-# ---- Sync pip's VENDORED certifi to the upgraded one -----------------------
-# pip ships its own private copy of certifi under `pip/_vendor/certifi`, used
-# only for TLS verification during `pip install`. Even after we upgrade the
-# real `certifi`, this vendored bundle keeps the OLD cacert.pem — which still
-# trusts the compromised emSign/eMudhra roots — and Trivy reads its version
-# from `pip/_vendor/vendor.txt` (e.g. certifi==2026.6.17, GHSA-6q48-6c7w-9gw2
-# CRITICAL). We faithfully upgrade the vendored copy: overwrite its cacert.pem
-# with the upgraded certifi's bundle and update the recorded version. This both
-# removes the real emSign exposure from pip and clears the Trivy finding.
-# Skipped cleanly if either certifi is not present. Opt out with
-# KEEP_EMSIGN_ROOT (same switch as the system-trust distrust).
+# ---- Make the Python TLS trust path eMudhra-clear --------------------------
+# IMPORTANT: upgrading `certifi` to 2026.10.19 is NOT sufficient on its own.
+# That release (GHSA-6q48-6c7w-9gw2) removes only the single compromised root
+# "emSign ECC Root CA - G3" but STILL ships three other eMudhra-operated roots
+# (emSign Root CA - G1 / C1, emSign ECC Root CA - C3). Trivy stops flagging the
+# package, but every Python HTTPS client that uses certifi (litellm, requests,
+# httpx, pip, ...) would keep trusting eMudhra. We distrust the WHOLE emSign
+# family in the OS store, so we do the same here for consistency.
+#
+# strip-emsign-certifi.py removes every emSign/eMudhra record from a cacert.pem
+# (idempotent; fails if any marker survives). We apply it to:
+#   1. the top-level `certifi` bundle (used by the agent's Python at runtime),
+#   2. pip's VENDORED certifi (pip/_vendor/certifi, used for pip's own TLS).
+# We also overwrite pip's vendored copy with the upgraded top-level files so its
+# recorded version (pip/_vendor/certifi/__init__.py + vendor.txt — both read by
+# Trivy) moves off the flagged 2026.6.17. Opt out with KEEP_EMSIGN_ROOT.
+COPY overlays/strip-emsign-certifi.py /usr/local/share/strip-emsign-certifi.py
 RUN if [ -z "$KEEP_EMSIGN_ROOT" ]; then \
         realdir="$(python -c 'import os,certifi; print(os.path.dirname(certifi.__file__))' 2>/dev/null || true)" ; \
         ver="$(python -c 'import importlib.metadata as m; print(m.version("certifi"))' 2>/dev/null || true)" ; \
         vend="$(python -c 'import importlib.util,os; s=importlib.util.find_spec("pip._vendor.certifi"); print(os.path.dirname(s.origin) if s and s.origin else "")' 2>/dev/null || true)" ; \
-        if [ -n "$realdir" ] && [ -n "$vend" ] && [ -d "$realdir" ] && [ -d "$vend" ]; then \
-            cp -a "$realdir"/. "$vend"/ \
-            && rm -rf "$vend/__pycache__" \
-            && echo ">>> replaced pip vendored certifi from $realdir (now $ver, incl cacert.pem + __version__)" ; \
-            vt="$(dirname "$vend")/vendor.txt" ; \
-            if [ -n "$ver" ] && [ -f "$vt" ]; then \
-                sed -i -E "s/^([[:space:]]*)certifi==.*/\1certifi==$ver/I" "$vt" \
-                && echo ">>> updated pip vendor.txt certifi==$ver" ; \
-            fi ; \
-            resid="$(grep -ri 'emSign' "$vend"/cacert.pem 2>/dev/null | head -1 || true)" ; \
-            if [ -n "$resid" ]; then \
-                echo "ERROR: emSign still present in pip vendored cacert.pem" >&2 ; exit 1 ; \
+        if [ -n "$realdir" ] && [ -d "$realdir" ]; then \
+            python /usr/local/share/strip-emsign-certifi.py "$realdir/cacert.pem" ; \
+            if [ -n "$vend" ] && [ -d "$vend" ]; then \
+                cp -a "$realdir"/. "$vend"/ \
+                && rm -rf "$vend/__pycache__" \
+                && echo ">>> replaced pip vendored certifi from $realdir (now $ver, incl stripped cacert.pem + __version__)" ; \
+                vt="$(dirname "$vend")/vendor.txt" ; \
+                if [ -n "$ver" ] && [ -f "$vt" ]; then \
+                    sed -i -E "s/^([[:space:]]*)certifi==.*/\1certifi==$ver/I" "$vt" \
+                    && echo ">>> updated pip vendor.txt certifi==$ver" ; \
+                fi ; \
+                python /usr/local/share/strip-emsign-certifi.py "$vend/cacert.pem" ; \
+            else \
+                echo ">>> pip has no vendored certifi; stripped top-level only." ; \
             fi ; \
         else \
-            echo ">>> pip vendored certifi not found; skipping sync." ; \
+            echo ">>> no top-level certifi found; skipping eMudhra strip." ; \
         fi ; \
     else \
-        echo ">>> KEEP_EMSIGN_ROOT set; leaving pip-vendored certifi untouched." ; \
+        echo ">>> KEEP_EMSIGN_ROOT set; leaving certifi trust bundles untouched." ; \
     fi
 
 # ---- Remove unused openvscode-server language-only extensions --------------
