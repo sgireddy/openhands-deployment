@@ -139,10 +139,39 @@ removing one does NOT cover the others:
    `pip/_vendor/vendor.txt` (watch the leading whitespace on that line); the
    overlay replaces the whole vendored dir from the upgraded top-level and
    rewrites both markers.
-3. **`uv`** (`GHSA-hq85-5cpj-mr62`) — vendors a webpki root set that
-   trusts the emSign root. Fixed in `uv 0.13.4`. If `uv` is a standalone
-   binary rather than a venv dep, the pip bump may not move it — then
-   `uv self update` or replace `/usr/local/bin/uv` in the overlay.
+3. **`uv`** (`GHSA-hq85-5cpj-mr62`) — vendors a `webpki-root-certs` bundle
+   **compiled into the binary** (NOT certifi). Fixed in `uv 0.13.4`, BUT, like
+   certifi, that only dropped `emSign ECC Root CA - G3`; uv's bundle still
+   embeds the rest of the family (verified via `strings /usr/bin/uv`: `emSign
+   ECC Root CA - C3`, `emSign Root CA - C1`, `emSign Root CA - G1`).
+   - **Do NOT pin uv via pip.** The base `agent-server` ships `uv` as a
+     standalone **musl binary at `/usr/bin/uv`** (0.13.5 on 1.58.1-python),
+     which is NOT a pip package. `pip install uv==x` cannot change it; it only
+     drops an equal/older pip-packaged uv at `/usr/local/bin/uv` that SHADOWS
+     the newer one (PATH puts `/usr/local/bin` first). The old `uv==0.13.4` pin
+     was therefore both ineffective and a downgrade — removed from
+     `PIP_UPGRADES_AGENT_SERVER`.
+   - **Fix = `ENV UV_NATIVE_TLS=1`** in the overlay. uv then verifies against
+     the platform trust store (rustls-platform-verifier) instead of its vendored
+     bundle, and we already stripped the whole emSign family from that OS store.
+     Proven on 1.58.1-python: `UV_NATIVE_TLS=1` + empty cert file/dir →
+     `invalid peer certificate: UnknownIssuer`; + cleaned store (0 emSign) →
+     success. The overlay guards the build if the OS bundle still has emSign.
+   - `openhands` has **no uv binary**, so this only applies to `agent-server`.
+
+### eMudhra/emSign validation matrix (pip / uv / certifi)
+
+| Component | Trusts eMudhra via | Advisory | Affected | Advisory-"safe" | Still family-dirty at "safe"? | How we make it eMudhra-CLEAN |
+|-----------|--------------------|----------|----------|-----------------|-------------------------------|------------------------------|
+| **certifi** | own `cacert.pem` | GHSA-6q48-6c7w-9gw2 (PYSEC-2026-4320) | `>=2019.03.09, <2026.10.19` | `2026.10.19` | **Yes** — keeps emSign G1/C1/ECC-C3 | pin `2026.10.19` + `strip-emsign-certifi.py` removes the whole family from `cacert.pem` |
+| **pip** | its **vendored** certifi (`pip/_vendor/certifi`) + `bom.cdx.json` SBOM | *(no pip-specific CVE; inherits certifi's)* | pip whose vendored certifi `<2026.10.19` | pip with vendored certifi `>=2026.10.19` | **Yes** — same G1/C1/ECC-C3 remain | overlay replaces vendored certifi from the stripped top-level, rewrites `vendor.txt` + SBOM (`fix-pip-sbom-certifi.py`) |
+| **uv** | `webpki-root-certs` **compiled into `/usr/bin/uv`** | GHSA-hq85-5cpj-mr62 (PYSEC-2026-4321) | `<0.13.4` | `0.13.4` | **Yes** — keeps emSign C3/C1/G1 | `ENV UV_NATIVE_TLS=1` → uv uses the cleaned OS trust store, bypassing the vendored bundle |
+
+Bottom line: **the published "safe" versions (certifi 2026.10.19, uv 0.13.4) are
+necessary but NOT sufficient** — each still ships the non-G3 emSign roots. Only
+the overlay's family-strip (certifi/pip) + native-TLS (uv) + OS-store distrust
+make the images genuinely eMudhra-clean. Verified 0 emSign in: OS store, certifi
+top-level cacert, pip-vendored cacert; and uv bound to the 0-emSign OS store.
 
 Related TLS-cert bug bundled alongside: `anyio` `CVE-2026-63374` (TLS
 certificate spoofing via IDNA) — fixed in `anyio 4.14.2`.
