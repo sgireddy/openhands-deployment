@@ -18,7 +18,10 @@
 #       --build-arg PIP_UPGRADES="urllib3==2.5.0 cryptography==45.0.0" \
 #       -t agent-server:custom_base .
 
-ARG BASE_IMAGE=ghcr.io/openhands/agent-server:1.19.0-python
+# Pin by DIGEST (not a floating tag) for reproducible, tamper-evident builds.
+# This digest is ghcr.io/openhands/agent-server:1.58.1-python (multi-arch).
+# Override BASE_IMAGE to bump; re-pin the digest when you do.
+ARG BASE_IMAGE=ghcr.io/openhands/agent-server:1.58.1-python@sha256:3ec59797bc2e237c7a3bda3468f4e26bc860416949d439fe3f485798afd814bc
 FROM ${BASE_IMAGE}
 
 ARG BASE_IMAGE
@@ -266,6 +269,37 @@ RUN if [ -n "$STRIP_DIND" ]; then \
         && rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/* ; \
     else \
         echo ">>> Keeping docker-in-docker stack (set STRIP_DIND=1 to remove)." ; \
+    fi
+
+# ---- Optional: strip the C/C++ build toolchain (reaches Critical=0) ----------
+# The only remaining Critical in the slim image is CVE-2026-93221 in
+# `linux-libc-dev` — the Linux *kernel header* package. It has no upstream fix
+# and is not runtime-exploitable in a container (the container uses the HOST
+# kernel; these are just .h definitions used at compile time). Purging it
+# cascades (via `libc6-dev`) to the whole toolchain: build-essential, gcc/g++,
+# libc6-dev, libstdc++-dev.
+#
+# TRADE-OFF — default OFF on purpose: this is an AGENT SANDBOX. Agents commonly
+# `pip install` packages with native extensions or compile code at runtime, which
+# needs gcc/make/libc headers. Removing the toolchain to win a kernel-header CVE
+# that can't be exploited in-container is usually a BAD trade. Keep it off unless
+# you KNOW your workloads never compile at runtime; then set
+# STRIP_BUILD_TOOLCHAIN=1 for a true Critical=0 image.
+ARG STRIP_BUILD_TOOLCHAIN=""
+RUN if [ -n "$STRIP_BUILD_TOOLCHAIN" ]; then \
+        echo ">>> Stripping C/C++ build toolchain (build-essential, gcc/g++, libc6-dev, linux-libc-dev) — removes runtime compilation capability" \
+        && apt-get update -y \
+        && apt-get purge -y --auto-remove \
+            linux-libc-dev libc6-dev build-essential \
+            g++ gcc 'g++-*' 'gcc-*' 'libstdc++-*-dev' \
+        && apt-get clean \
+        && rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/* ; \
+        if dpkg-query -W -f='${Package}\n' linux-libc-dev >/dev/null 2>&1; then \
+            echo "ERROR: linux-libc-dev still present after toolchain purge" >&2 ; exit 1 ; \
+        fi ; \
+        echo ">>> Build toolchain removed; linux-libc-dev gone (CVE-2026-93221 cleared)." ; \
+    else \
+        echo ">>> Keeping C/C++ build toolchain (set STRIP_BUILD_TOOLCHAIN=1 to remove; clears linux-libc-dev CVE-2026-93221 but disables runtime native compilation)." ; \
     fi
 
 # ---- Replace older bundled Node 22 with the already-fixed system Node 22 --

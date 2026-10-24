@@ -21,7 +21,12 @@
 #       --build-arg PIP_UPGRADES="urllib3==2.5.0 cryptography==45.0.0" \
 #       -t openhands:custom_base .
 
-ARG BASE_IMAGE=openhands:latest
+# The slim overlay builds ON TOP of the already-hardened multi-arch
+# sgireddy/openhands:custom_base, pinned by DIGEST for reproducible, tamper-
+# evident builds. For a from-scratch regular custom_base, override BASE_IMAGE
+# with a locally built openhands:latest. Re-pin the digest when custom_base
+# is rebuilt.
+ARG BASE_IMAGE=docker.io/sgireddy/openhands:custom_base@sha256:7b3e9c5d55238ff0a8f86f562e8c39775a26010e3f200f34da877006090017a5
 FROM ${BASE_IMAGE}
 
 ARG BASE_IMAGE
