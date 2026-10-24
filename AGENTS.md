@@ -31,6 +31,34 @@ NOT yet rebuilt/pushed multi-arch: the *regular* (non-slim) `custom_base`
 tags, and the openhands regular base needs a source-built `openhands:latest`
 (0.x fork) which isn't present — deferred, pending the 1.x base-sourcing call.
 
+### agent-server's 1 remaining Critical — deliberate accept, with an opt-out
+
+CVE-2026-93221 lives in `linux-libc-dev` (Linux KERNEL HEADERS). No upstream
+fix; NOT runtime-exploitable in a container (the container uses the host
+kernel; these are compile-time `.h` definitions). Purging it cascades (via
+`libc6-dev`) to the whole C/C++ toolchain: build-essential, gcc/g++,
+libstdc++-14-dev. The runtime `libstdc++6` lib is KEPT.
+
+Policy call: this is an **agent sandbox** where agents routinely compile native
+code / pip-install C-extension packages at runtime, so removing the toolchain
+to win a non-exploitable kernel-header CVE is usually a BAD trade. So the
+published default KEEPS the toolchain and accepts the 1 CVE. The overlay now
+has `ARG STRIP_BUILD_TOOLCHAIN` (default OFF) that purges it for a true
+Critical=0 image when you KNOW runtime compilation isn't needed. Proven on
+arm64: with the flag, Trivy = 0 Critical, gcc/linux-libc-dev gone, libstdc++6
+runtime intact. Use `apt-get purge -y linux-libc-dev && apt-get autoremove
+--purge -y` (purging the root lets apt compute the clean 8-pkg cascade; an
+explicit+wildcard list trips `pkgProblemResolver` breaks — don't do that).
+
+### Base images are now DIGEST-pinned
+
+Overlay `BASE_IMAGE` defaults are pinned by `@sha256:` (not floating tags) for
+reproducible, tamper-evident builds and to avoid the tag-drift class that
+caused the stale-scan scare:
+- agent-server → `ghcr.io/openhands/agent-server:1.58.1-python@sha256:3ec59797…`
+- openhands    → `docker.io/sgireddy/openhands:custom_base@sha256:7b3e9c5d…`
+Re-pin when bumping the base.
+
 ### Trivy cache gotcha (cost us a scare on this push)
 
 `trivy image <tag>` served a STALE result for
