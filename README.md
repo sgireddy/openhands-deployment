@@ -78,6 +78,33 @@ at runtime — only enable it if your workloads never do.
 Base images are **pinned by digest** in the overlays for reproducible,
 tamper-evident builds; re-pin when you bump the base.
 
+A true **Critical=0** agent-server is also published as
+`custom_base-slim-0c` (toolchain stripped, no runtime native compilation).
+
+### Signing & verification (cosign)
+
+Signatures bind to **digests**, so consumers can verify the exact bytes they
+run. `scripts/sign.sh` (and `scripts/sign.ps1`) sign/verify the published slim
+digests. **You own the key** — the scripts never generate or commit a private
+key; `cosign.key` is gitignored, only `cosign.pub` is committed.
+
+```bash
+# one-time: create YOUR key pair (choose a strong password when prompted)
+cosign generate-key-pair            # -> cosign.key (PRIVATE, gitignored) + cosign.pub
+
+# sign the published slim digests (uses DOCKER_CONFIG auth for the push)
+export COSIGN_PASSWORD='…'          # or let cosign prompt
+DOCKER_CONFIG=$HOME/.docker-ssh ./scripts/sign.sh sign
+
+# anyone can then verify:
+./scripts/sign.sh verify            # uses cosign.pub
+# or directly:
+cosign verify --key cosign.pub docker.io/sgireddy/agent-server:custom_base-slim
+```
+
+Keyless (OIDC/Fulcio) signing is also supported with `SIGN_MODE=keyless`, but
+needs an interactive browser login and identity-based verification.
+
 ## Prerequisites
 
 - Docker Desktop (or Docker Engine ≥ 24.x).
