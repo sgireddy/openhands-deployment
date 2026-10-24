@@ -14,6 +14,64 @@ top of an upstream maintainer-published base, then is scanned by Scout
 or Trivy. Output images are tagged `:custom_base` and pushed to
 `docker.io/sgireddy/{openhands,agent-server}`.
 
+## Latest published hardened slim set (2026-10-23, multi-arch amd64+arm64)
+
+Built via the Apple-Silicon Mac's `ohpush` docker-container buildx builder
+(DOCKER_CONFIG=$HOME/.docker-ssh), `--provenance=false`. Registry Trivy
+re-scan BY DIGEST (see cache gotcha below):
+
+| Tag | Manifest list | amd64 | arm64 | CRITICAL/arch |
+|-----|---------------|-------|-------|---------------|
+| `agent-server:custom_base-slim` (+`-1.58.1`) | `fdef4615e097…` | `8e9dc1327b2d…` | `412bb202e347…` | 1 (linux-libc-dev CVE-2026-93221, no fix, accepted) |
+| `agent-server:custom_base-slim-0c` (+`-0c-1.58.1`) | `92ecf4055ab3…` | `68fb754acd2c…` | `f6f51c05e048…` | **0** (toolchain stripped; no runtime native compile) |
+| `openhands:custom_base-slim` | `40309da22f83…` | `6833f637c977…` | `b906d37d6bb4…` | **0** |
+
+Both are eMudhra-clean (OS store + certifi top/vendored stripped; agent-server
+uv on UV_NATIVE_TLS). openhands slim has OpenSSH purged (CVE-2026-60002).
+NOT yet rebuilt/pushed multi-arch: the *regular* (non-slim) `custom_base`
+tags, and the openhands regular base needs a source-built `openhands:latest`
+(0.x fork) which isn't present — deferred, pending the 1.x base-sourcing call.
+
+### agent-server's 1 remaining Critical — deliberate accept, with an opt-out
+
+CVE-2026-93221 lives in `linux-libc-dev` (Linux KERNEL HEADERS). No upstream
+fix; NOT runtime-exploitable in a container (the container uses the host
+kernel; these are compile-time `.h` definitions). Purging it cascades (via
+`libc6-dev`) to the whole C/C++ toolchain: build-essential, gcc/g++,
+libstdc++-14-dev. The runtime `libstdc++6` lib is KEPT.
+
+Policy call: this is an **agent sandbox** where agents routinely compile native
+code / pip-install C-extension packages at runtime, so removing the toolchain
+to win a non-exploitable kernel-header CVE is usually a BAD trade. So the
+published default KEEPS the toolchain and accepts the 1 CVE. The overlay now
+has `ARG STRIP_BUILD_TOOLCHAIN` (default OFF) that purges it for a true
+Critical=0 image when you KNOW runtime compilation isn't needed. Proven on
+arm64: with the flag, Trivy = 0 Critical, gcc/linux-libc-dev gone, libstdc++6
+runtime intact. Use `apt-get purge -y linux-libc-dev && apt-get autoremove
+--purge -y` (purging the root lets apt compute the clean 8-pkg cascade; an
+explicit+wildcard list trips `pkgProblemResolver` breaks — don't do that).
+
+### Base images are now DIGEST-pinned
+
+Overlay `BASE_IMAGE` defaults are pinned by `@sha256:` (not floating tags) for
+reproducible, tamper-evident builds and to avoid the tag-drift class that
+caused the stale-scan scare:
+- agent-server → `ghcr.io/openhands/agent-server:1.58.1-python@sha256:3ec59797…`
+- openhands    → `docker.io/sgireddy/openhands:custom_base@sha256:7b3e9c5d…`
+Re-pin when bumping the base.
+
+### Trivy cache gotcha (cost us a scare on this push)
+
+`trivy image <tag>` served a STALE result for
+`sgireddy/agent-server:custom_base-slim` — reporting 30 Criticals with the
+OLD `1.19.1`-era digest's versions (certifi 2026.2.25, uv 0.11.5, anyio
+4.13.0, perl 5.40.1-6, linux-libc-dev 6.12.85). dpkg ground truth inside the
+freshly pushed image proved it clean+patched (perl 5.40.1-6+deb13u1, gnutls
++deb13u4, linux-libc-dev 6.12.113, certifi 2026.10.19, uv 0.13.5). Fix:
+`trivy clean --all` then **scan BY DIGEST**, not by tag. Always verify a
+suspicious Trivy result against `dpkg-query -W` / on-disk versions before
+believing it.
+
 ## Build / scan / push topology
 
 The repo is developed on **two Macs** but **only the Intel Mac has a
@@ -96,6 +154,300 @@ be temporarily allowed via `--ignore-unfixed` style filtering, but the
 user explicitly does NOT want that filter as default; the goal is
 **Critical=0 across the board**, achieved by removing the unused
 components that carry the CVEs.
+
+## emSign / eMudhra CA distrust (2026-10)
+
+The emSign root (eMudhra's CA brand) had compromised intermediate CA
+keys and is being distrusted everywhere. It shows up in **three**
+independent trust stores in our images, and each needs its own fix —
+removing one does NOT cover the others:
+
+1. **Debian system trust store** (`ca-certificates`). Debian blacklisted
+   `emSign ECC Root CA - G3` in `ca-certificates 20260816+nmu1`
+   (bug #1151413, NMU 2026-10-20) but that upload only reached
+   `sid`/`forky`. `trixie` (20250419) and `bookworm` (20230311+deb12u1)
+   still trust it, so `apt-get upgrade` alone does NOT remove it.
+   **IMPORTANT: emSign is a FAMILY of roots, not just G3.** trixie
+   `ca-certificates 20250419` ships FOUR emSign roots:
+   `emSign_ECC_Root_CA_-_C3`, `emSign_ECC_Root_CA_-_G3`,
+   `emSign_Root_CA_-_C1`, `emSign_Root_CA_-_G1`. The first overlay version
+   only blacklisted G3 and the build-guard (correctly) FAILED because the
+   other three survived in `/etc/ssl/certs`. The overlays now blacklist
+   **every** `mozilla/emSign*` line (prefix with `!`, case-insensitive,
+   then `update-ca-certificates --fresh`). Default-on; opt out with
+   `--build-arg KEEP_EMSIGN_ROOT=1` once stable backports the distrust.
+   The overlay step self-verifies and fails the build if NO emSign entry
+   is found (upstream rename) or if ANY emSign link survives in
+   `/etc/ssl/certs`. (This fail-closed guard is what caught the G3-only
+   gap on the 1.58.0-python base — keep it.)
+2. **Python `certifi`** (`GHSA-6q48-6c7w-9gw2`) — bundles its own CA
+   pem. **Bumping to `certifi 2026.10.19` is necessary but NOT sufficient.**
+   That release removes only the ONE compromised root
+   (`emSign ECC Root CA - G3`); it STILL ships three other eMudhra roots
+   (`emSign Root CA - G1`, `emSign Root CA - C1`,
+   `emSign ECC Root CA - C3`). Trivy stops flagging the package (the CVE'd
+   root is gone) but the Python TLS path (litellm/requests/httpx/pip) would
+   keep trusting eMudhra. The overlays run `overlays/strip-emsign-certifi.py`
+   on BOTH the top-level `certifi/cacert.pem` AND pip's vendored
+   `pip/_vendor/certifi/cacert.pem` to remove the whole family — matching the
+   OS-store distrust. The emSign-residue guard in the overlay step fails the
+   build if any eMudhra marker survives. Pin certifi via `PIP_UPGRADES_*`.
+   NOTE: pip's **vendored** certifi is a SEPARATE copy Trivy reports by the
+   version in `pip/_vendor/certifi/__init__.py` (`__version__`),
+   `pip/_vendor/vendor.txt`, and `pip/_vendor/bom.cdx.json`.
+   **Simplified approach (2026-10-23):** rather than hand-replacing the vendored
+   dir + rewriting those three markers, we rely on a FIXED pip. `pip==26.2.2`
+   already vendors certifi 2026.10.19 with all three markers consistent, so
+   Trivy is clean with zero file surgery. We just (a) carry `pip==26.2.2` in
+   `PIP_UPGRADES_*`, and (b) strip the residual non-G3 emSign family from the
+   vendored `cacert.pem` (contents only; version metadata untouched). The
+   overlay fails the build if the vendored certifi version is still `< 2026.10.19`
+   (tells you to bump pip). The old `fix-pip-sbom-certifi.py` + cp-replace +
+   `vendor.txt` sed are **removed**. Agent-server's base pip is already 26.2.2;
+   the openhands app base ships pip 26.0.1 (vendored certifi 2026.01.04) so the
+   pip bump is REQUIRED there.
+3. **`uv`** (`GHSA-hq85-5cpj-mr62`) — vendors a `webpki-root-certs` bundle
+   **compiled into the binary** (NOT certifi). Fixed in `uv 0.13.4`, BUT, like
+   certifi, that only dropped `emSign ECC Root CA - G3`; uv's bundle still
+   embeds the rest of the family (verified via `strings /usr/bin/uv`: `emSign
+   ECC Root CA - C3`, `emSign Root CA - C1`, `emSign Root CA - G1`).
+   - **Do NOT pin uv via pip.** The base `agent-server` ships `uv` as a
+     standalone **musl binary at `/usr/bin/uv`** (0.13.5 on 1.58.1-python),
+     which is NOT a pip package. `pip install uv==x` cannot change it; it only
+     drops an equal/older pip-packaged uv at `/usr/local/bin/uv` that SHADOWS
+     the newer one (PATH puts `/usr/local/bin` first). The old `uv==0.13.4` pin
+     was therefore both ineffective and a downgrade — removed from
+     `PIP_UPGRADES_AGENT_SERVER`.
+   - **Fix = `ENV UV_NATIVE_TLS=1`** in the overlay. uv then verifies against
+     the platform trust store (rustls-platform-verifier) instead of its vendored
+     bundle, and we already stripped the whole emSign family from that OS store.
+     Proven on 1.58.1-python: `UV_NATIVE_TLS=1` + empty cert file/dir →
+     `invalid peer certificate: UnknownIssuer`; + cleaned store (0 emSign) →
+     success. The overlay guards the build if the OS bundle still has emSign.
+   - **Defense-in-depth assertion:** the overlay also fails the build if the
+     base's uv is `< ARG UV_MIN_VERSION` (default `0.13.4`) — the uncompromised
+     floor from GHSA-hq85-5cpj-mr62 — so a future base regression is caught
+     loudly even though native TLS already neutralizes the trust path. Uses
+     `sort -V` so `0.13.10 >= 0.13.4` compares correctly. Base is currently uv
+     0.13.5 (also the latest on PyPI), so the assertion passes. We do NOT pin uv
+     via pip (that can't move the standalone `/usr/bin/uv` binary and would only
+     shadow it with an older pip-packaged uv).
+   - `openhands` has **no uv binary**, so this only applies to `agent-server`.
+
+### eMudhra/emSign validation matrix (pip / uv / certifi)
+
+| Component | Trusts eMudhra via | Advisory | Affected | Advisory-"safe" | Still family-dirty at "safe"? | How we make it eMudhra-CLEAN |
+|-----------|--------------------|----------|----------|-----------------|-------------------------------|------------------------------|
+| **certifi** | own `cacert.pem` | GHSA-6q48-6c7w-9gw2 (PYSEC-2026-4320) | `>=2019.03.09, <2026.10.19` | `2026.10.19` | **Yes** — keeps emSign G1/C1/ECC-C3 | pin `2026.10.19` + `strip-emsign-certifi.py` removes the whole family from `cacert.pem` |
+| **pip** | its **vendored** certifi (`pip/_vendor/certifi`) + `bom.cdx.json` SBOM | *(no pip-specific CVE; inherits certifi's)* | pip whose vendored certifi `<2026.10.19` (e.g. pip 26.0.1 → 2026.01.04) | **pip 26.2.2** (vendors certifi 2026.10.19, all markers consistent) | **Yes** — same G1/C1/ECC-C3 remain | pin `pip==26.2.2` in `PIP_UPGRADES_*` (fixes the version with no file surgery) + strip the emSign family from the vendored `cacert.pem` |
+| **uv** | `webpki-root-certs` **compiled into `/usr/bin/uv`** | GHSA-hq85-5cpj-mr62 (PYSEC-2026-4321) | `<0.13.4` | `0.13.4` | **Yes** — keeps emSign C3/C1/G1 | `ENV UV_NATIVE_TLS=1` → uv uses the cleaned OS trust store, bypassing the vendored bundle |
+
+Bottom line: **the published "safe" versions (certifi 2026.10.19, uv 0.13.4) are
+necessary but NOT sufficient** — each still ships the non-G3 emSign roots. Only
+the overlay's family-strip (certifi/pip) + native-TLS (uv) + OS-store distrust
+make the images genuinely eMudhra-clean. Verified 0 emSign in: OS store, certifi
+top-level cacert, pip-vendored cacert; and uv bound to the 0-emSign OS store.
+
+Related TLS-cert bug bundled alongside: `anyio` `CVE-2026-63374` (TLS
+certificate spoofing via IDNA) — fixed in `anyio 4.14.2`.
+
+### `linux-libc-dev` kernel-header CVEs (accepted, not runtime-applicable)
+
+Trivy flags two Criticals on the `linux-libc-dev` package in the
+agent-server (1.58.0-python base, Debian 13.7):
+
+- `CVE-2026-93221` — **no fix available** in any suite.
+- `CVE-2026-98805` — fixed in `6.12.113-1`, but that version is **not in
+  the base image's pinned apt snapshot** (`snapshot.debian.org/.../
+  20261004T000000Z`); the newest candidate there is `6.12.111-1`, so
+  `apt-get upgrade` cannot pull it. (Confirmed via `apt-cache policy`.)
+
+`linux-libc-dev` is **kernel headers only** — there is no running kernel in
+the image; containers use the host kernel. These kernel CVEs are therefore
+not exploitable through the headers package at runtime. We accept them and
+do NOT purge the package by default, because removing it cascades to
+`libc6-dev`/the C toolchain (`libc6-dev depends on linux-libc-dev`), which
+the sandbox may need to build C-extension wheels at runtime. If a literal
+`Critical=0` Trivy number is required, the user can opt into a toolchain
+strip, accepting the loss of in-sandbox compilation. Scout/Trivy will keep
+listing these until Debian backports `6.12.113-1` into the pinned snapshot.
+
+## Trivy CRITICAL review snapshot (2026-10-22)
+
+Scanned the **published** Hub slim images with fresh Trivy DB. Both have
+accumulated Criticals because the artifacts predate these CVEs — a
+rebuild + re-push is required. Most OS Criticals clear automatically on
+rebuild (fixed versions are in `trixie-security`); the pip ones need the
+`PIP_UPGRADES_*` pins now recorded in `.env.example`.
+
+`sgireddy/openhands:custom_base-slim` — 28 Critical:
+- OS (fixed on rebuild): `libgnutls30t64` 3.8.9-3+deb13u2→u4 (2),
+  `perl*`/`libperl5.40` 5.40.1-6→+deb13u1 (many).
+- OS (NO fix, document): `openssh-*`/`ssh` `CVE-2026-60002`.
+- Python pins: `certifi`→2026.10.19, `anyio`→4.14.2, `litellm`→1.84.0
+  (`CVE-2026-49468`), `pillow`→13.0.0 (4 CVEs), `GitPython`→3.1.59,
+  `PyJWT`→2.14.0, `jupyter_server`→2.20.0.
+
+`sgireddy/agent-server:custom_base-slim` — 31 Critical:
+- OS (fixed on rebuild): `libglib2.0-0t64`/`-data` →2.84.4-3~deb13u4 (2),
+  `libgnutls30t64` →u4 (2), `perl*` →+deb13u1, `linux-libc-dev`
+  →6.12.113-1 (the fixed ones).
+- OS (NO fix, document): `libxml2` `CVE-2026-6653`; `linux-libc-dev`
+  `CVE-2026-93221` (kernel *headers* only — not a running kernel, low
+  runtime impact; consider dropping the dev package).
+- Node (bundled npm): `@google/gemini-cli` 0.38.0→0.39.1
+  (`CVE-2026-12537`, RCE), `proxy-addr` 2.0.7→2.0.8, `tar` →7.5.19
+  (`CVE-2026-59873`). **Now fixed in the overlay** (see below).
+- Python pins: `certifi`→2026.10.19, `uv`→0.13.4, `anyio`→4.14.2.
+
+Re-scan from the registry after rebuild/push to confirm 0C.
+
+## Rebuild on 1.58.0-python base — local Trivy verification (2026-10-22)
+
+Built `overlays/Dockerfile.agent-server` against
+`ghcr.io/openhands/agent-server:1.58.0-python` (Debian **13.7**), linux/arm64,
+`--load` for local scan, with `STRIP_BROWSER_TOOLS=1 STRIP_DIND=1` and
+`PIP_UPGRADES="certifi==2026.10.19 uv==0.13.4 anyio==4.14.2 litellm==1.93.2"`.
+
+Trivy CRITICAL went 4 → 2 after the overlay fixes. Remaining 2 are both
+`linux-libc-dev` kernel-header CVEs (accepted — see the emSign section above).
+
+Fixes that cleared the others (all now in the overlays):
+- **shell-quote** — the bundled copy in
+  `/openhands/.openvscode-server/node_modules/shell-quote` was 1.8.3
+  (`CVE-2026-9277` ACE). 1.8.4 was ALSO vulnerable (`CVE-2026-102422`), so we
+  pin **1.12.0** (latest, 0 OSV advisories) and replace every bundled copy via
+  `npm pack` (download-only; doesn't disturb the dep tree).
+- **certifi / emSign** — version and bundle-contents are separate problems.
+  History (what we first built) then the simplified current approach:
+  - FIRST approach (now removed): hand-fix all three pip-vendored markers —
+    `pip/_vendor/certifi/__init__.py` `__version__`, `pip/_vendor/vendor.txt`,
+    and `pip/_vendor/bom.cdx.json` (Trivy reads the SBOM in preference and kept
+    reporting the old 2026.6.17) — via a cp-replace + sed + `fix-pip-sbom-certifi.py`.
+  - CURRENT approach (2026-10-23): rely on a FIXED pip for the VERSION, then
+    only strip the bundle CONTENTS:
+    1. top-level `certifi` — pin `2026.10.19` via PIP_UPGRADES + strip the 3
+       residual eMudhra roots from its `cacert.pem`.
+    2. pip's vendored certifi — pin `pip==26.2.2` (vendors certifi 2026.10.19
+       with consistent `__version__`/`vendor.txt`/`bom.cdx.json`, so Trivy is
+       clean with no file surgery) + strip the emSign family from its
+       `cacert.pem`. Build fails if the vendored certifi is still `< 2026.10.19`.
+    `fix-pip-sbom-certifi.py` and the cp-replace/sed are gone.
+
+Verified in the built images: OS trust store has no emSign; `certifi.where()`
+and the pip-vendored cacert both have 0 emSign records; installed versions
+certifi 2026.10.19, litellm 1.93.2, anyio 4.14.2, shell-quote 1.12.0;
+pip 26.2.2 (vendored certifi 2026.10.19); uv 0.13.5 on native TLS.
+
+## openhands slim overlay — local Trivy verification (2026-10-23)
+
+Built `overlays/Dockerfile.openhands` on top of local `openhands:custom_base`
+(the documented slim-on-custom_base pattern), linux/arm64, `--load`, with
+`STRIP_VSCODE_BUILD_ARTIFACTS=1`, the new `STRIP_OPENSSH=1`, and
+`PIP_UPGRADES="certifi==2026.10.19 anyio==4.14.2 litellm==1.93.2 pillow==13.0.0
+GitPython==3.1.59 PyJWT==2.14.0 jupyter_server==2.20.0 lxml==6.1.0"`.
+
+Result: **Trivy CRITICAL = 0** (HIGH 153 → 130). Verified in-image: OS trust
+store has no emSign; `/app/.venv` certifi cacert 0 emSign, certifi 2026.10.19,
+litellm 1.93.2, anyio 4.14.2, pillow 13.0.0, lxml 6.1.0; no openssh packages.
+
+The certifi/emSign overlay steps run as the **openhands** user and correctly
+target the `/app/.venv` venv (stripped 3 eMudhra roots from the top-level
+cacert, synced the pip-vendored copy). Confirms the mirrored fixes work in the
+app image's venv layout.
+
+### OpenSSH `CVE-2026-60002` (client-side, unfixable) — removed via STRIP_OPENSSH
+
+The openhands base ships openssh 1:10.0p1-* (client/server/sftp-server/ssh).
+`CVE-2026-60002` is a use-after-free in the `ssh` **client** when a server
+swaps its host key during a key re-exchange (pre-OpenSSH 10.4, client-side
+only). Debian has **no fix in any suite**, so it shows as 4 Criticals (one per
+openssh sub-package). The app runs no sshd and uses git over HTTPS+token (git
+only *Recommends* ssh-client, does not depend on it), so OpenSSH is unused.
+
+`overlays/Dockerfile.openhands` now has an opt-in `STRIP_OPENSSH` build-arg that
+purges all four openssh packages (verified: no cascade to git/libssl) with a
+fail-closed post-purge dpkg check. Default OFF (keeps git+ssh). Enabling it is
+what takes the openhands slim to 0 Critical. agent-server does NOT ship openssh,
+so no equivalent flag is needed there.
+
+Still TODO: the multi-arch `--push` of both images + registry re-scan. For a
+fully current openhands app, note the local base is the **0.x** source fork
+(`~/projects/OpenHands`, describe `0.22.0-...`), not the new 1.x SDK app — the
+1.x app is distributed differently and is a separate base-sourcing decision.
+
+## Base-image currency + litellm supply-chain (2026-10-22)
+
+Target the newest published bases:
+
+- **agent-server**: `ghcr.io/openhands/agent-server:1.58.0-python` (newest
+  release, multi-arch amd64+arm64, Debian 13.4 / Trixie). `.env.example`
+  `AGENT_SERVER_BASE_TAG` bumped 1.19.1-python → 1.58.0-python.
+  `scripts/update.{sh,ps1}` already derive this tag from the SDK's latest
+  GitHub release, so they need no edit.
+- **openhands app**: newest OpenHands release is **v1.31.0** (2026-10-22).
+  The 1.x app is SDK-based and is NOT published as a single `1.31.0`
+  container under `openhands/openhands` or `all-hands-ai/openhands` (those
+  are the legacy 0.x line). Build the base locally from the `v1.31.0` tag
+  (`make build`) or use your fleet's derived image — the repo's
+  `OPENHANDS_BASE_IMAGE=openhands:latest` local-build flow is unchanged.
+
+### litellm — pin `1.93.2`, never `1.107.x`
+
+Both images pull litellm via `openhands-sdk` v1.58.0, which constrains
+`litellm>=1.93.0,<1.106` (1.106+ needs `mcp>=2`, breaks on mcp 1.x; see
+software-agent-sdk #6088). Evidence from OSV (2026-10-22):
+
+- **`litellm` 1.107.0 is MALICIOUS** — OSV `MAL-2026-2144` (also 1.82.7,
+  1.82.8). 1.107.0 is yanked from PyPI (install → 404). **Never pin it.**
+- `CVE-2026-84377` (`GHSA-3cv6-jpf6-8222`): authenticated SSRF +
+  provider-credential exfiltration. Fixed on the 1.93 branch in **1.93.2**
+  (mainline 1.88.6). The SDK lock target 1.93.0 and our old 1.84.0 pin are
+  both still vulnerable.
+- Secure+compatible window is therefore **[1.93.2, 1.106)**. We pin
+  `litellm==1.93.2` (minimal bump off the SDK's own branch, fixes 84377).
+  1.105.x is the newest within the cap if a newer one is ever wanted.
+- Residual no-fix litellm advisories (`CVE-2026-1277x`/`1279x`) are
+  authenticated-proxy issues; OpenHands uses litellm as a client library,
+  so they do not apply. Accept/track like the no-fix OS CVEs.
+
+`litellm==1.93.2` is now in both `PIP_UPGRADES_OPENHANDS` and
+`PIP_UPGRADES_AGENT_SERVER` (the agent-server bundles the SDK too, so it
+ships litellm and needs the same pin).
+
+### Bundled-npm fix (agent-server overlay)
+
+A default-on step updates the npm toolchains and ACP agent CLIs in place
+rather than stripping them (the ACP agents are a product feature):
+
+- Update bundled `npm` to `12.2.1` in both `/usr/local` and
+  `/opt/acp-node` — it vendors `tar ^7.5.22`, clearing every
+  `npm`-internal `tar` copy (`CVE-2026-59873`).
+- Update `@google/gemini-cli` to `0.39.1` (`CVE-2026-12537` RCE).
+- Refresh `proxy-addr` to `2.0.8` under `claude-agent-acp`
+  (best-effort; the `POLICY_MAX_CRITICAL=0` scan gate is the backstop).
+
+Pins are build-args (`NPM_PIN`, `GEMINI_CLI_PIN`, `PROXY_ADDR_PIN`); opt
+out with `--build-arg KEEP_BUNDLED_NPM=1`. This step needs network and
+could not be exercised in the authoring environment — validate on the
+first Mac build; the self-fail/scan-gate catches a wrong path assumption.
+
+### No-fix OS CVEs — decisions
+
+These have no fixed Debian package yet; accept and track, do not strip:
+
+- `openssh-*`/`ssh` `CVE-2026-60002` (openhands) — openssh is used for
+  git-over-SSH; keep. Revisit when `trixie-security` ships a fix.
+- `libxml2` `CVE-2026-6653` (agent-server) — core library, broadly
+  depended on; keep.
+- `linux-libc-dev` `CVE-2026-93221` (agent-server) — kernel *headers*,
+  not a running kernel; negligible runtime risk. Removable if nothing
+  compiles against headers at runtime, but kept by default to avoid
+  breaking source builds of pip packages.
+
+Because these are unfixable, they do NOT violate `POLICY_MAX_CRITICAL=0`
+when the scan gate is run with fixed-only filtering; keep the default
+(no `--ignore-unfixed`) and treat them as a documented exception.
 
 ## Known-good patterns
 

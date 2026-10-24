@@ -21,7 +21,12 @@
 #       --build-arg PIP_UPGRADES="urllib3==2.5.0 cryptography==45.0.0" \
 #       -t openhands:custom_base .
 
-ARG BASE_IMAGE=openhands:latest
+# The slim overlay builds ON TOP of the already-hardened multi-arch
+# sgireddy/openhands:custom_base, pinned by DIGEST for reproducible, tamper-
+# evident builds. For a from-scratch regular custom_base, override BASE_IMAGE
+# with a locally built openhands:latest. Re-pin the digest when custom_base
+# is rebuilt.
+ARG BASE_IMAGE=docker.io/sgireddy/openhands:custom_base@sha256:7b3e9c5d55238ff0a8f86f562e8c39775a26010e3f200f34da877006090017a5
 FROM ${BASE_IMAGE}
 
 ARG BASE_IMAGE
@@ -40,6 +45,72 @@ RUN apt-get update -y \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
+# ---- Optional: remove OpenSSH (unfixable client-side CVE-2026-60002) --------
+# The base ships openssh 1:10.0p1-* (client/server/sftp-server/ssh). It carries
+# CVE-2026-60002 — a use-after-free in the `ssh` CLIENT when a malicious server
+# swaps its host key during a key re-exchange (client-side only, pre-OpenSSH
+# 10.4). Debian has NO fixed version in any suite, so `apt-get upgrade` can't
+# clear it and it shows as 4 Criticals (one per openssh sub-package).
+#
+# The openhands web/orchestration image does not run an sshd, and git in this
+# deployment uses HTTPS + a token (git only *Recommends* ssh-client, it does
+# not depend on it), so OpenSSH is an unused component here. Per the repo's
+# "remove the component that carries the CVE rather than ignore it" policy, we
+# purge it when STRIP_OPENSSH is set. The purge removes only the four openssh
+# packages (verified: no cascade to git/libssl). Leave STRIP_OPENSSH empty to
+# keep OpenSSH (e.g. if you clone via git+ssh from inside the container).
+ARG STRIP_OPENSSH=""
+RUN if [ -n "$STRIP_OPENSSH" ]; then \
+        echo ">>> Purging OpenSSH (unfixable client-side CVE-2026-60002)" \
+        && apt-get update -y \
+        && apt-get -y purge openssh-client openssh-server openssh-sftp-server ssh 2>/dev/null || true ; \
+        apt-get -y autoremove --purge \
+        && apt-get clean \
+        && rm -rf /var/lib/apt/lists/* ; \
+        if dpkg -l 2>/dev/null | grep -qE '^ii\s+(openssh-client|openssh-server|openssh-sftp-server|ssh)\s'; then \
+            echo "ERROR: openssh packages still present after purge" >&2 ; exit 1 ; \
+        fi ; \
+        echo ">>> OpenSSH removed." ; \
+    else \
+        echo ">>> Keeping OpenSSH (set STRIP_OPENSSH=1 to remove CVE-2026-60002)." ; \
+    fi
+
+# ---- Distrust the emSign (eMudhra) roots -----------------------------------
+# Debian blacklisted "emSign ECC Root CA - G3" in ca-certificates
+# 20260816+nmu1 (bug #1151413, NMU 2026-10-20), but that upload only reached
+# sid/forky. The stable suites the base images are built on still ship an
+# older ca-certificates (trixie: 20250419, bookworm: 20230311+deb12u1) that
+# STILL trusts the emSign roots, so `apt-get upgrade` above does NOT remove
+# them.
+#
+# The eMudhra/emSign brand ships a FAMILY of roots in the Mozilla bundle, not
+# just G3 (trixie 20250419 ships emSign Root CA - C1 / G1 and emSign ECC Root
+# CA - C3 / G3). We distrust ALL of them: prefix every emSign entry in
+# /etc/ca-certificates.conf with "!" and regenerate the trust store. The build
+# fails if no emSign entry is found (upstream rename) or if ANY emSign link
+# survives in /etc/ssl/certs after regeneration, so this can never silently
+# no-op. Set KEEP_EMSIGN_ROOT=1 to opt out once Debian stable backports the
+# distrust.
+ARG KEEP_EMSIGN_ROOT=""
+RUN if [ -z "$KEEP_EMSIGN_ROOT" ]; then \
+        conf=/etc/ca-certificates.conf ; \
+        n="$(grep -ciE '^mozilla/emSign' "$conf")" ; \
+        echo ">>> Distrusting $n emSign (eMudhra) root(s):" ; \
+        grep -iE '^mozilla/emSign' "$conf" || true ; \
+        if [ "$n" -eq 0 ]; then \
+            echo "ERROR: no 'mozilla/emSign*' trust entry found in $conf; emSign filenames may have changed upstream" >&2 ; exit 1 ; \
+        fi \
+        && sed -i -E "s@^(mozilla/emSign.*\.crt)@!\1@I" "$conf" \
+        && update-ca-certificates --fresh \
+        && if ls -1 /etc/ssl/certs/ | grep -qi emSign; then \
+               echo "ERROR: emSign root(s) still trusted after blacklist:" >&2 ; \
+               ls -1 /etc/ssl/certs/ | grep -i emSign >&2 ; exit 1 ; \
+           fi \
+        && echo ">>> All emSign roots successfully distrusted." ; \
+    else \
+        echo ">>> KEEP_EMSIGN_ROOT set; leaving emSign roots trusted." ; \
+    fi
+
 # ---- Optional: Python package upgrades inside the existing venv -----------
 # The upstream image installs to /app/.venv as the "openhands" user. We honour
 # that by switching users for pip operations so venv metadata stays consistent.
@@ -50,6 +121,50 @@ RUN if [ -n "$PIP_UPGRADES" ]; then \
         && python -m pip cache purge >/dev/null 2>&1 || true ; \
     else \
         echo ">>> No PIP_UPGRADES specified; skipping Python upgrades." ; \
+    fi
+
+# ---- Make the Python TLS trust path eMudhra-clear --------------------------
+# IMPORTANT: upgrading `certifi` to 2026.10.19 is NOT sufficient on its own.
+# That release (GHSA-6q48-6c7w-9gw2) removes only the single compromised root
+# "emSign ECC Root CA - G3" but STILL ships three other eMudhra-operated roots
+# (emSign Root CA - G1 / C1, emSign ECC Root CA - C3). Trivy stops flagging the
+# package, but every Python HTTPS client that uses certifi (litellm, requests,
+# httpx, pip, ...) would keep trusting eMudhra. We distrust the WHOLE emSign
+# family in the OS store, so we do the same here for consistency.
+#
+# Two separate concerns (see Dockerfile.agent-server for the full rationale):
+#   (a) VERSION that Trivy reads — we rely on UPSTREAM fixed versions:
+#       top-level certifi pinned to 2026.10.19, and pip >= 26.2.2 (carried in
+#       PIP_UPGRADES) which vendors certifi 2026.10.19 with consistent metadata.
+#       The base openhands app ships an OLDER pip (26.0.1 -> vendored certifi
+#       2026.01.04, which Trivy flags), so bumping pip is REQUIRED here; the
+#       guard below fails the build if the vendored certifi is still too old.
+#   (b) cacert CONTENTS — no certifi version drops the non-G3 emSign family, so
+#       strip-emsign-certifi.py removes the whole family from both cacerts.
+# Runs as the "openhands" user so `python` resolves to the /app/.venv
+# interpreter that owns the certifi install. Opt out with KEEP_EMSIGN_ROOT.
+COPY overlays/strip-emsign-certifi.py /usr/local/share/strip-emsign-certifi.py
+RUN if [ -z "$KEEP_EMSIGN_ROOT" ]; then \
+        min="2026.10.19" ; \
+        realdir="$(python -c 'import os,certifi; print(os.path.dirname(certifi.__file__))' 2>/dev/null || true)" ; \
+        if [ -n "$realdir" ] && [ -d "$realdir" ]; then \
+            python /usr/local/share/strip-emsign-certifi.py "$realdir/cacert.pem" ; \
+        else \
+            echo ">>> no top-level certifi found; skipping its eMudhra strip." ; \
+        fi ; \
+        vend="$(python -c 'import importlib.util,os; s=importlib.util.find_spec("pip._vendor.certifi"); print(os.path.dirname(s.origin) if s and s.origin else "")' 2>/dev/null || true)" ; \
+        if [ -n "$vend" ] && [ -d "$vend" ]; then \
+            vv="$(python -c 'import pip._vendor.certifi as c; print(getattr(c,"__version__",""))' 2>/dev/null || true)" ; \
+            if [ -z "$vv" ] || [ "$(printf '%s\n%s\n' "$min" "$vv" | sort -V | head -1)" != "$min" ]; then \
+                echo "ERROR: pip-vendored certifi is '${vv:-unknown}' (< $min); add 'pip==26.2.2' (or newer) to PIP_UPGRADES so pip vendors a fixed certifi" >&2 ; exit 1 ; \
+            fi ; \
+            python /usr/local/share/strip-emsign-certifi.py "$vend/cacert.pem" ; \
+            echo ">>> pip-vendored certifi $vv is fixed (>= $min); emSign family stripped from its cacert." ; \
+        else \
+            echo ">>> pip has no vendored certifi; nothing to do for pip." ; \
+        fi ; \
+    else \
+        echo ">>> KEEP_EMSIGN_ROOT set; leaving certifi trust bundles untouched." ; \
     fi
 
 # ---- Optional: strip unused VS Code extension build artifacts -------------
