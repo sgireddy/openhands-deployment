@@ -23,6 +23,7 @@ re-scan BY DIGEST (see cache gotcha below):
 | Tag | Manifest list | amd64 | arm64 | CRITICAL/arch |
 |-----|---------------|-------|-------|---------------|
 | `agent-server:custom_base-slim` (+`-1.58.1`) | `fdef4615e097…` | `8e9dc1327b2d…` | `412bb202e347…` | 1 (linux-libc-dev CVE-2026-93221, no fix, accepted) |
+| `agent-server:custom_base-slim-0c` (+`-0c-1.58.1`) | `92ecf4055ab3…` | `68fb754acd2c…` | `f6f51c05e048…` | **0** (toolchain stripped; no runtime native compile) |
 | `openhands:custom_base-slim` | `40309da22f83…` | `6833f637c977…` | `b906d37d6bb4…` | **0** |
 
 Both are eMudhra-clean (OS store + certifi top/vendored stripped; agent-server
