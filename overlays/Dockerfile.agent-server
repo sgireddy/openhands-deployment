@@ -287,11 +287,10 @@ RUN if [ -n "$STRIP_DIND" ]; then \
 # STRIP_BUILD_TOOLCHAIN=1 for a true Critical=0 image.
 ARG STRIP_BUILD_TOOLCHAIN=""
 RUN if [ -n "$STRIP_BUILD_TOOLCHAIN" ]; then \
-        echo ">>> Stripping C/C++ build toolchain (build-essential, gcc/g++, libc6-dev, linux-libc-dev) — removes runtime compilation capability" \
+        echo ">>> Stripping C/C++ build toolchain — purging linux-libc-dev lets apt cascade-remove its dependents (libc6-dev, build-essential, gcc/g++, libstdc++-dev). Removes runtime compilation capability; keeps the libstdc++6 RUNTIME lib." \
         && apt-get update -y \
-        && apt-get purge -y --auto-remove \
-            linux-libc-dev libc6-dev build-essential \
-            g++ gcc 'g++-*' 'gcc-*' 'libstdc++-*-dev' \
+        && apt-get purge -y linux-libc-dev \
+        && apt-get autoremove --purge -y \
         && apt-get clean \
         && rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/* ; \
         if dpkg-query -W -f='${Package}\n' linux-libc-dev >/dev/null 2>&1; then \
