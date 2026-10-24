@@ -58,6 +58,26 @@ The **bash** scripts (`*.sh`) and **PowerShell** scripts (`*.ps1`) are
 behaviourally equivalent ports of one another; same flags, same exit
 codes, same reports. Pick whichever your shell prefers.
 
+### Image variants & security posture (recommended: slim)
+
+The overlays can produce two shapes per image. **The `slim` variants are the
+supported, recommended artifacts** — they carry far less attack surface:
+
+| Variant | What it strips | Posture |
+|---------|----------------|---------|
+| **`custom_base-slim`** (recommended) | agent-server: Chromium/browser stack, docker-in-docker, VS Code build sandbox. openhands: OpenSSH (unfixable CVE-2026-60002), VS Code build artifacts. | Published, multi-arch, eMudhra-clean. agent-server = 1 accepted Critical (kernel-headers, non-exploitable); openhands = 0 Critical. |
+| **`custom_base`** (regular) | nothing beyond apt/pip upgrades | **Deprecated** — larger surface (keeps DinD's privileged docker path, browser/Chromium CVEs). Use only if you specifically need those tools; don't make it your default. |
+
+Hardening levers (all opt-in via build-args, see `.env.example`):
+`STRIP_BROWSER_TOOLS`, `STRIP_DIND`, `STRIP_VSCODE_BUILD_ARTIFACTS`,
+`STRIP_OPENSSH`, and `STRIP_BUILD_TOOLCHAIN`. The last one reaches a true
+**Critical=0** agent-server by removing `linux-libc-dev` + the C/C++ toolchain,
+but is **OFF by default** because an agent sandbox often compiles native code
+at runtime — only enable it if your workloads never do.
+
+Base images are **pinned by digest** in the overlays for reproducible,
+tamper-evident builds; re-pin when you bump the base.
+
 ## Prerequisites
 
 - Docker Desktop (or Docker Engine ≥ 24.x).
