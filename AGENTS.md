@@ -61,8 +61,25 @@ is a CUSTOM repo (not the upstream default), the TAG is used VERBATIM — no
 version rewrite — so running agent-server 1.58.1 under an app that bundles 1.33.0
 is accepted. Verified live: app `-0c-1.10.0` spawns
 `sgireddy/agent-server:custom_base-slim-0c-1.58.1` sandbox containers and polls
-their HTTP endpoint (handshake OK). The user's `~/projects/oh_docker/oh.sh` now
-pins the app by digest and sets these two envs.
+their HTTP endpoint (handshake OK). `~/projects/oh_docker/oh.sh` and
+`oh-claude.sh` pin the app by digest and set these two envs.
+
+#### ⚠️ `AGENT_SERVER_IMAGE_REPOSITORY` must NOT include the `docker.io/` prefix
+
+Use `sgireddy/agent-server`, NOT `docker.io/sgireddy/agent-server`. The preset
+sandbox spec id is `get_agent_server_image()` = `"<repo>:<tag>"`, but when the
+app reads a created sandbox back it stores
+`sandbox_spec_id = container.image.tags[0]` (docker_sandbox_service.py:231), and
+Docker's `image.tags` STRIPS the `docker.io/` registry prefix. With the prefix
+in the env, the preset id (`docker.io/sgireddy/agent-server:…`) never equals the
+stored id (`sgireddy/agent-server:…`), so
+`live_status_app_conversation_service._start_app_conversation` hits
+`assert sandbox_spec is not None` and every conversation fails to start (the
+sandbox container launches, then the start aborts — orphaned sandboxes pile up).
+Symptom in logs: `Error starting conversation / AssertionError` at
+`live_status_app_conversation_service.py:393`. The app image var (run/pulled
+directly) may keep the `docker.io/` prefix; only the agent-server REPOSITORY env
+is prefix-sensitive because of the `image.tags[0]` comparison.
 NOT yet rebuilt/pushed multi-arch: the *regular* (non-slim) `custom_base`
 tags, and the openhands regular base needs a source-built `openhands:latest`
 (0.x fork) which isn't present — deferred, pending the 1.x base-sourcing call.
