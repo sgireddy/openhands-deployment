@@ -24,6 +24,7 @@ re-scan BY DIGEST (see cache gotcha below):
 |-----|---------------|-------|-------|---------------|
 | `agent-server:custom_base-slim` (+`-1.58.1`) | `fdef4615e097…` | `8e9dc1327b2d…` | `412bb202e347…` | 1 (linux-libc-dev CVE-2026-93221, no fix, accepted) |
 | `agent-server:custom_base-slim-0c` (+`-0c-1.58.1`) | `49d835335ecb…` | `48d702bca355…` | `995ce99bd4aa…` | **0** (snapshot→live apt + toolchain stripped) |
+| `agent-server:custom_base-slim-0c-1.33.0` | `3eadbc3f6c8d…` | `74d1c41f7946…` | `14497f8cd0c4…` | **0** (matches app 1.10.0's bundled agent-server; +XFCE/libxml2 strip, uv/uvx 0.13.5) |
 | `openhands:custom_base-slim-0c` (+`-0c-1.10.0`) | `d71f18d34c37…` | `86555e746c24…` | `edd8353b5481…` | **0** (snapshot→live apt + OpenSSH purged + py pins) |
 | `openhands:custom_base-slim` | `40309da22f83…` | `6833f637c977…` | `b906d37d6bb4…` | **0** |
 
@@ -583,6 +584,11 @@ when the scan gate is run with fixed-only filtering; keep the default
 | `sgireddy/agent-server:custom_base-1.19.1`       | `8e88e6506cca…`             | (alias of regular)                                   |
 | `sgireddy/agent-server:custom_base-slim`         | `844840c105c8…`             | no chromium/VNC/Mesa + no DinD + node 22.22 symlink  |
 | `sgireddy/agent-server:custom_base-slim-1.19.1`  | `844840c105c8…`             | (alias of slim)                                      |
+| `sgireddy/agent-server:custom_base-slim-0c-1.33.0` | `3eadbc3f6c8d…`           | 0-Critical, emSign-clean; **version-matched to app 1.10.0's bundled agent-server 1.33.0** (avoids ConversationInfo schema skew) |
+
+Per-arch digests for `custom_base-slim-0c-1.33.0` (`3eadbc3f6c8d…`):
+- `linux/amd64` → `sha256:74d1c41f7946…`
+- `linux/arm64` → `sha256:14497f8cd0c4…`
 
 Per-arch digests for the agent-server slim manifest list (`844840c105c8…`):
 - `linux/amd64` → `sha256:0e85ee72836a…`
