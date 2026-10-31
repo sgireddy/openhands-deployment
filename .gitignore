@@ -50,3 +50,7 @@ node_modules/
 __pycache__/
 *.pyc
 .venv/
+
+# cosign signing — NEVER commit the private key (commit only cosign.pub)
+cosign.key
+*.key

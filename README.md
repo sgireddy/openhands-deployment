@@ -58,6 +58,53 @@ The **bash** scripts (`*.sh`) and **PowerShell** scripts (`*.ps1`) are
 behaviourally equivalent ports of one another; same flags, same exit
 codes, same reports. Pick whichever your shell prefers.
 
+### Image variants & security posture (recommended: slim)
+
+The overlays can produce two shapes per image. **The `slim` variants are the
+supported, recommended artifacts** — they carry far less attack surface:
+
+| Variant | What it strips | Posture |
+|---------|----------------|---------|
+| **`custom_base-slim`** (recommended) | agent-server: Chromium/browser stack, docker-in-docker, VS Code build sandbox. openhands: OpenSSH (unfixable CVE-2026-60002), VS Code build artifacts. | Published, multi-arch, eMudhra-clean. agent-server = 1 accepted Critical (kernel-headers, non-exploitable); openhands = 0 Critical. |
+| **`custom_base`** (regular) | nothing beyond apt/pip upgrades | **Deprecated** — larger surface (keeps DinD's privileged docker path, browser/Chromium CVEs). Use only if you specifically need those tools; don't make it your default. |
+
+Hardening levers (all opt-in via build-args, see `.env.example`):
+`STRIP_BROWSER_TOOLS`, `STRIP_DIND`, `STRIP_VSCODE_BUILD_ARTIFACTS`,
+`STRIP_OPENSSH`, and `STRIP_BUILD_TOOLCHAIN`. The last one reaches a true
+**Critical=0** agent-server by removing `linux-libc-dev` + the C/C++ toolchain,
+but is **OFF by default** because an agent sandbox often compiles native code
+at runtime — only enable it if your workloads never do.
+
+Base images are **pinned by digest** in the overlays for reproducible,
+tamper-evident builds; re-pin when you bump the base.
+
+A true **Critical=0** agent-server is also published as
+`custom_base-slim-0c` (toolchain stripped, no runtime native compilation).
+
+### Signing & verification (cosign)
+
+Signatures bind to **digests**, so consumers can verify the exact bytes they
+run. `scripts/sign.sh` (and `scripts/sign.ps1`) sign/verify the published slim
+digests. **You own the key** — the scripts never generate or commit a private
+key; `cosign.key` is gitignored, only `cosign.pub` is committed.
+
+```bash
+# one-time: create YOUR key pair (choose a strong password when prompted)
+cosign generate-key-pair            # -> cosign.key (PRIVATE, gitignored) + cosign.pub
+
+# sign the published slim digests (uses DOCKER_CONFIG auth for the push)
+export COSIGN_PASSWORD='…'          # or let cosign prompt
+DOCKER_CONFIG=$HOME/.docker-ssh ./scripts/sign.sh sign
+
+# anyone can then verify:
+./scripts/sign.sh verify            # uses cosign.pub
+# or directly:
+cosign verify --key cosign.pub docker.io/sgireddy/agent-server:custom_base-slim
+```
+
+Keyless (OIDC/Fulcio) signing is also supported with `SIGN_MODE=keyless`, but
+needs an interactive browser login and identity-based verification.
+
 ## Prerequisites
 
 - Docker Desktop (or Docker Engine ≥ 24.x).
@@ -580,17 +627,25 @@ build the slim variant with both strips on:
 docker buildx build \
     --file overlays/Dockerfile.agent-server \
     --platform linux/amd64,linux/arm64 \
-    --build-arg BASE_IMAGE=ghcr.io/openhands/agent-server:1.19.1-python \
+    --build-arg BASE_IMAGE=ghcr.io/openhands/agent-server:1.58.1-python \
+    --build-arg PIP_UPGRADES="pip==26.2.2 certifi==2026.10.19 anyio==4.14.2 litellm==1.93.2" \
     --build-arg STRIP_BROWSER_TOOLS=1 \
     --build-arg STRIP_DIND=1 \
     --provenance=false \
     --tag <your-registry>/agent-server:custom_base-slim \
-    --tag <your-registry>/agent-server:custom_base-slim-1.19.1 \
+    --tag <your-registry>/agent-server:custom_base-slim-1.58.1 \
     --push .
 ```
 
 The two strip flags are independent — turning on only one is supported
 if you need just half of the trade-off.
+
+The `PIP_UPGRADES` above clears the fixable Critical Python CVEs
+(`certifi`/`uv` emSign CA distrust, `anyio` TLS spoofing). Two further
+default-on steps run without any flag: the emSign system-root blacklist
+and the bundled-npm fix (updates `npm`→12.2.1, `@google/gemini-cli`→0.39.1,
+`proxy-addr`→2.0.8). Opt out with `--build-arg KEEP_EMSIGN_ROOT=1` and
+`--build-arg KEEP_BUNDLED_NPM=1` respectively.
 
 > **Why `--provenance=false`?** Without that flag, BuildKit attaches an
 > in-toto SLSA provenance attestation that lists the BASE_IMAGE as a
@@ -624,6 +679,44 @@ To rebuild without one of the strips later, omit that specific build-arg
 or pass it empty (`--build-arg STRIP_BROWSER_TOOLS=`,
 `--build-arg STRIP_DIND=`).
 
+#### `agent-server:custom_base-browser` — KEEP Chromium, strip only the VNC desktop
+
+If your conversations **do** need the agent's browser tool, do **not** use
+`STRIP_BROWSER_TOOLS=1` — that removes Chromium, and new conversations then
+fail at startup with *"Chromium is required for browser operations but is not
+installed."* Instead use `STRIP_VNC_DESKTOP=1`, which keeps Chromium (and the
+libraries it links) but removes the genuinely-unused human-facing graphical
+stack: the TigerVNC server, the noVNC web client, and the full XFCE desktop.
+
+```bash
+docker buildx build \
+    --file overlays/Dockerfile.agent-server \
+    --platform linux/amd64,linux/arm64 \
+    --build-arg BASE_IMAGE=ghcr.io/openhands/agent-server:1.33.0-python@sha256:9b96c86134d74cf9ad4846ab288af7ebcbb4423559c38e314ff922761d1c1e4d \
+    --build-arg PIP_UPGRADES="pip==26.2.2 certifi==2026.10.19 anyio==4.14.2 litellm==1.93.2" \
+    --build-arg STRIP_VNC_DESKTOP=1 \
+    --build-arg STRIP_DIND=1 \
+    --build-arg STRIP_BUILD_TOOLCHAIN=1 \
+    --provenance=false \
+    --tag <your-registry>/agent-server:custom_base-browser \
+    --tag <your-registry>/agent-server:custom_base-browser-1.33.0 \
+    --push .
+```
+
+`STRIP_VNC_DESKTOP=1` clears two of the three Criticals that the full browser
+strip removes — `CVE-2026-34352` (tigervnc) and `CVE-2026-1525` (node-undici,
+via noVNC) — because neither the VNC server nor noVNC is used by the agent's
+headless Chromium. A build-time guard fails the build if Chromium is removed by
+accident, and `STRIP_VNC_DESKTOP` is ignored if `STRIP_BROWSER_TOOLS=1` is also
+set (Chromium is already gone).
+
+**CVE cost of keeping Chromium:** this image is **not** Critical=0. Trivy
+reports exactly one Critical — `libxml2 CVE-2026-6653`, an **unfixable**
+(no upstream fix) denial-of-service via crafted XML. `libxml2` is a mandatory
+Chromium dependency, so the only way to reach Critical=0 is to drop Chromium
+entirely (the slim variant). This single unfixable DoS is the floor for any
+Chromium-capable image.
+
 #### `openhands:custom_base-slim` — strip VS Code extension build sandbox + bump litellm/lxml
 
 The upstream `openhands` web image ships the source tree of the
@@ -651,12 +744,36 @@ docker buildx build \
     --file overlays/Dockerfile.openhands \
     --platform linux/amd64,linux/arm64 \
     --build-arg BASE_IMAGE=docker.io/sgireddy/openhands:custom_base \
-    --build-arg PIP_UPGRADES="litellm==1.83.7 lxml==6.1.0" \
+    --build-arg PIP_UPGRADES="pip==26.2.2 certifi==2026.10.19 anyio==4.14.2 litellm==1.93.2 pillow==13.0.0 GitPython==3.1.59 PyJWT==2.14.0 jupyter_server==2.20.0 lxml==6.1.0" \
     --build-arg STRIP_VSCODE_BUILD_ARTIFACTS=1 \
+    --build-arg STRIP_OPENSSH=1 \
     --provenance=false \
     --tag <your-registry>/openhands:custom_base-slim \
     --push .
 ```
+
+The `PIP_UPGRADES` list clears the fixable Critical Python CVEs found in
+the 2026-10-22 Trivy review (`certifi` emSign distrust, `anyio` TLS
+spoofing, `litellm`, `pillow`, `GitPython`, `PyJWT`, `jupyter_server`).
+`pillow` 12→13 is a major bump — review if you depend on its API. The
+emSign system-root blacklist also runs by default here
+(`--build-arg KEEP_EMSIGN_ROOT=1` to opt out).
+
+`STRIP_OPENSSH=1` purges OpenSSH, which carries the unfixable
+`CVE-2026-60002` (a client-side use-after-free in `ssh` when a server
+swaps its host key during rekey; no Debian fix in any suite). The app
+runs no sshd and clones over HTTPS+token, so this is safe here and is
+what takes the openhands slim image to **0 Critical**. Omit the flag if
+you clone via `git+ssh` from inside the container. `agent-server` does
+not ship OpenSSH, so it needs no equivalent flag.
+
+> **litellm pin — important.** `litellm==1.93.2` is deliberate, not just
+> "latest". `1.107.0` is a **malicious** release (OSV `MAL-2026-2144`,
+> now yanked from PyPI) — never use it. `1.93.2` fixes `CVE-2026-84377`
+> (authenticated SSRF + provider-credential exfiltration), which the SDK
+> lock target `1.93.0` is still vulnerable to, and stays inside the
+> `openhands-sdk` window `>=1.93.0,<1.106` (1.106+ breaks on MCP 1.x).
+> See the litellm block in `.env.example` for the full rationale.
 
 (Replace `BASE_IMAGE` with whichever upstream openhands image you build
 your regular `:custom_base` from — e.g. a locally-built `openhands:latest`,

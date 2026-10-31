@@ -18,7 +18,10 @@
 #       --build-arg PIP_UPGRADES="urllib3==2.5.0 cryptography==45.0.0" \
 #       -t agent-server:custom_base .
 
-ARG BASE_IMAGE=ghcr.io/openhands/agent-server:1.19.0-python
+# Pin by DIGEST (not a floating tag) for reproducible, tamper-evident builds.
+# This digest is ghcr.io/openhands/agent-server:1.58.1-python (multi-arch).
+# Override BASE_IMAGE to bump; re-pin the digest when you do.
+ARG BASE_IMAGE=ghcr.io/openhands/agent-server:1.58.1-python@sha256:3ec59797bc2e237c7a3bda3468f4e26bc860416949d439fe3f485798afd814bc
 FROM ${BASE_IMAGE}
 
 ARG BASE_IMAGE
@@ -33,20 +36,230 @@ LABEL org.opencontainers.image.title="agent-server-hardened" \
 # The agent-server image typically runs as root to support sandbox operations
 # (chrooted filesystem ops, package installs, etc.) so we don't drop privs.
 USER root
+
+# The upstream base pins apt to a FROZEN Debian snapshot (snapshot.debian.org,
+# e.g. .../archive/debian/20261019T.../) for reproducible builds. That freeze
+# means `apt-get upgrade` can NEVER see security fixes published after the
+# snapshot date — so Critical OS CVEs with an available deb13uX fix (libbrotli1,
+# gnutls, perl, openssl, ...) stay unpatched no matter how often we rebuild.
+# To meet the Critical=0 goal we repoint the snapshot URIs to the LIVE Debian +
+# security mirrors before upgrading, so the newest published fixes are pulled.
+# Set APT_SNAPSHOT_OVERRIDE="" to keep the base's frozen snapshot (reproducible
+# but potentially behind on security).
+ARG APT_SNAPSHOT_OVERRIDE=1
+RUN if [ -n "$APT_SNAPSHOT_OVERRIDE" ]; then \
+        echo ">>> Repointing frozen Debian snapshot -> live mirrors for current security fixes" ; \
+        for f in /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources; do \
+            [ -e "$f" ] || continue ; \
+            sed -i -E \
+              -e 's#https?://snapshot\.debian\.org/archive/debian-security/[0-9TZ]+/?#http://security.debian.org/debian-security/#g' \
+              -e 's#https?://snapshot\.debian\.org/archive/debian/[0-9TZ]+/?#http://deb.debian.org/debian/#g' \
+              "$f" ; \
+        done ; \
+    else \
+        echo ">>> Keeping base's frozen apt snapshot (APT_SNAPSHOT_OVERRIDE empty)." ; \
+    fi
 RUN apt-get update -y \
     && apt-get -y upgrade \
     && apt-get -y autoremove --purge \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
+# ---- Distrust the emSign (eMudhra) roots -----------------------------------
+# Debian blacklisted "emSign ECC Root CA - G3" in ca-certificates
+# 20260816+nmu1 (bug #1151413, NMU 2026-10-20), but that upload only reached
+# sid/forky. The stable suites the base images are built on still ship an
+# older ca-certificates (trixie: 20250419, bookworm: 20230311+deb12u1) that
+# STILL trusts the emSign roots, so `apt-get upgrade` above does NOT remove
+# them.
+#
+# The eMudhra/emSign brand ships a FAMILY of roots in the Mozilla bundle, not
+# just G3 (trixie 20250419 ships emSign Root CA - C1 / G1 and emSign ECC Root
+# CA - C3 / G3). We distrust ALL of them: prefix every emSign entry in
+# /etc/ca-certificates.conf with "!" and regenerate the trust store. The build
+# fails if no emSign entry is found (upstream rename) or if ANY emSign link
+# survives in /etc/ssl/certs after regeneration, so this can never silently
+# no-op. Set KEEP_EMSIGN_ROOT=1 to opt out once Debian stable backports the
+# distrust.
+ARG KEEP_EMSIGN_ROOT=""
+RUN if [ -z "$KEEP_EMSIGN_ROOT" ]; then \
+        conf=/etc/ca-certificates.conf ; \
+        n="$(grep -ciE '^mozilla/emSign' "$conf")" ; \
+        echo ">>> Distrusting $n emSign (eMudhra) root(s):" ; \
+        grep -iE '^mozilla/emSign' "$conf" || true ; \
+        if [ "$n" -eq 0 ]; then \
+            echo "ERROR: no 'mozilla/emSign*' trust entry found in $conf; emSign filenames may have changed upstream" >&2 ; exit 1 ; \
+        fi \
+        && sed -i -E "s@^(mozilla/emSign.*\.crt)@!\1@I" "$conf" \
+        && update-ca-certificates --fresh \
+        && if ls -1 /etc/ssl/certs/ | grep -qi emSign; then \
+               echo "ERROR: emSign root(s) still trusted after blacklist:" >&2 ; \
+               ls -1 /etc/ssl/certs/ | grep -i emSign >&2 ; exit 1 ; \
+           fi \
+        && echo ">>> All emSign roots successfully distrusted." ; \
+    else \
+        echo ">>> KEEP_EMSIGN_ROOT set; leaving emSign roots trusted." ; \
+    fi
+
+# ---- Make `uv`'s TLS trust path eMudhra-clear ------------------------------
+# uv does NOT use certifi — it verifies TLS against a copy of `webpki-root-certs`
+# compiled INTO the binary (`/usr/bin/uv`, a standalone musl binary, not a pip
+# package). GHSA-hq85-5cpj-mr62 removed only `emSign ECC Root CA - G3` in uv
+# 0.13.4; the base's uv 0.13.5 is advisory-safe but its vendored bundle STILL
+# embeds the rest of the eMudhra family (emSign ECC Root CA - C3, emSign Root CA
+# - C1 / G1). A `pip install uv==x` does NOT change this binary (and would only
+# shadow it with an equal-or-older pip-packaged uv), so the pin is useless here.
+#
+# The robust fix is `UV_NATIVE_TLS=1`: uv then verifies against the platform
+# trust store (via rustls-platform-verifier) instead of its vendored bundle. We
+# already stripped the ENTIRE emSign family from that OS store above, so uv
+# inherits an eMudhra-clean trust set. Proven: with UV_NATIVE_TLS=1 and an empty
+# OS store, uv fails `UnknownIssuer`; with the cleaned store it succeeds. Set
+# KEEP_EMSIGN_ROOT=1 to opt out (keeps uv on its vendored bundle).
+ENV UV_NATIVE_TLS=1
+ARG UV_MIN_VERSION=0.13.4
+# Remediation (not just detection): bases older than uv 0.13.4 (e.g. the
+# agent-server <= 1.33.x line ships uv 0.11.x) carry a vendored webpki bundle
+# that still trusts the compromised emSign/eMudhra roots (GHSA-hq85-5cpj-mr62),
+# and the same old uv binary vendors a vulnerable `zip` Rust crate
+# (CVE-2026-115905, fixed in zip 9.0.5 / shipped by current uv). UV_NATIVE_TLS=1
+# already routes uv around the vendored CA bundle at runtime, but to also clear
+# the scanner findings we replace EVERY uv/uvx binary below UV_MIN_VERSION with a
+# pinned, checksum-verified upstream build from astral-sh's official GitHub
+# release, and we remove any stale `uv-*.dist-info` python-package metadata (the
+# uv wheel is just a binary + dist-info; nothing imports it at runtime). A
+# `pip install uv` can NOT fix the binaries (uv is a standalone musl binary).
+# NOTE: older bases ship uv in MULTIPLE locations (e.g. /usr/local/bin AND
+# /usr/bin); the first `command -v uv` is not enough, so we enumerate the whole
+# filesystem. Idempotent: only touches uv artifacts below UV_MIN_VERSION.
+ARG TARGETARCH
+# 0.13.5 (not .6): the official 0.13.6 `uvx` binary is flagged by scanners for a
+# vendored `zip` 8.1.0 (CVE-2026-115905); 0.13.5's uvx is clean and is the
+# version proven 0-Critical in the 1.58.1 slim image. Both are >= UV_MIN_VERSION
+# so the emSign fix (GHSA-hq85-5cpj-mr62) still holds.
+ARG UV_UPGRADE_VERSION=0.13.5
+RUN if [ -z "$KEEP_EMSIGN_ROOT" ]; then \
+        set -e ; \
+        case "$TARGETARCH" in \
+            amd64|"") triple="x86_64-unknown-linux-musl" ;; \
+            arm64) triple="aarch64-unknown-linux-musl" ;; \
+            *) echo "ERROR: unsupported TARGETARCH='$TARGETARCH' for uv upgrade" >&2 ; exit 1 ;; \
+        esac ; \
+        below_min() { [ -z "$1" ] || [ "$(printf '%s\n%s\n' "$UV_MIN_VERSION" "$1" | sort -V | head -1)" != "$UV_MIN_VERSION" ]; } ; \
+        need=0 ; \
+        for b in $(find / -type f \( -name uv -o -name uvx \) 2>/dev/null); do \
+            v="$("$b" --version 2>/dev/null | awk '/^uvx? /{print $2}')" ; \
+            [ -n "$v" ] || continue ; if below_min "$v"; then need=1 ; fi ; \
+        done ; \
+        for m in $(find / -path '*/uv-*.dist-info' -type d 2>/dev/null); do \
+            dv="$(basename "$m" | sed -E 's/^uv-([0-9][0-9A-Za-z.]*)\.dist-info$/\1/')" ; \
+            if below_min "$dv"; then need=1 ; fi ; \
+        done ; \
+        if [ "$need" = "1" ]; then \
+            echo ">>> Replacing all uv/uvx < ${UV_MIN_VERSION} with ${UV_UPGRADE_VERSION} (GHSA-hq85-5cpj-mr62 emSign + vendored zip CVE-2026-115905)" ; \
+            url="https://github.com/astral-sh/uv/releases/download/${UV_UPGRADE_VERSION}/uv-${triple}.tar.gz" ; \
+            tmp="$(mktemp -d)" ; \
+            curl -fsSL "$url" -o "$tmp/uv.tar.gz" ; \
+            curl -fsSL "${url}.sha256" -o "$tmp/uv.tar.gz.sha256" ; \
+            expected="$(awk '{print $1}' "$tmp/uv.tar.gz.sha256")" ; \
+            actual="$(sha256sum "$tmp/uv.tar.gz" | awk '{print $1}')" ; \
+            [ "$expected" = "$actual" ] || { echo "ERROR: uv ${UV_UPGRADE_VERSION} checksum mismatch (expected ${expected}, got ${actual})" >&2 ; exit 1 ; } ; \
+            tar -xzf "$tmp/uv.tar.gz" -C "$tmp" ; \
+            for b in $(find / -type f -name uv 2>/dev/null); do \
+                v="$("$b" --version 2>/dev/null | awk '/^uv /{print $2}')" ; \
+                [ -n "$v" ] || continue ; if below_min "$v"; then \
+                    echo "    replacing $b ($v -> ${UV_UPGRADE_VERSION})" ; install -m 0755 "$tmp/uv-${triple}/uv" "$b" ; fi ; \
+            done ; \
+            for b in $(find / -type f -name uvx 2>/dev/null); do \
+                if ! cmp -s "$tmp/uv-${triple}/uvx" "$b"; then \
+                    echo "    replacing uvx $b -> pinned ${UV_UPGRADE_VERSION} (uvx is a thin shim that reports the uv binary's --version, so it is replaced by content, not version: the stale shim still vendors a vulnerable zip crate, CVE-2026-115905)" ; \
+                    install -m 0755 "$tmp/uv-${triple}/uvx" "$b" ; fi ; \
+            done ; \
+            for m in $(find / -path '*/uv-*.dist-info' -type d 2>/dev/null); do \
+                dv="$(basename "$m" | sed -E 's/^uv-([0-9][0-9A-Za-z.]*)\.dist-info$/\1/')" ; \
+                if below_min "$dv"; then echo "    removing stale uv dist-info $m ($dv)" ; rm -rf "$m" ; fi ; \
+            done ; \
+            rm -rf "$tmp" ; \
+        else \
+            echo ">>> all uv/uvx already >= ${UV_MIN_VERSION}; nothing to replace." ; \
+        fi ; \
+        rm -rf /root/.cache/uv /root/.cache/uvx /home/*/.cache/uv 2>/dev/null || true ; \
+        if grep -qi emSign /etc/ssl/certs/ca-certificates.crt 2>/dev/null; then \
+            echo "ERROR: OS trust bundle still contains emSign; uv native-TLS would trust it" >&2 ; exit 1 ; \
+        fi ; \
+        for b in $(find / -type f \( -name uv -o -name uvx \) 2>/dev/null); do \
+            v="$("$b" --version 2>/dev/null | awk '/^uvx? /{print $2}')" ; \
+            [ -n "$v" ] || continue ; if below_min "$v"; then \
+                echo "ERROR: $b still at '$v' (< $UV_MIN_VERSION) after upgrade" >&2 ; exit 1 ; fi ; \
+        done ; \
+        echo ">>> All uv/uvx >= ${UV_MIN_VERSION}; stale uv dist-info removed; uv cache purged; UV_NATIVE_TLS=1 routes TLS through the cleaned OS store." ; \
+    else \
+        echo ">>> KEEP_EMSIGN_ROOT set; leaving uv on its vendored webpki bundle." ; \
+    fi
+
 # ---- Optional: Python package upgrades -------------------------------------
-# We don't assume a specific venv layout — use whichever `python` is on PATH.
+# Apply to BOTH the interpreter on PATH AND the agent-server's own venv. The
+# agent-server runs from a uv-managed venv at /usr/local/venv, which the default
+# `python` (/usr/local/lib/python3.13) does NOT cover — so a plain `pip install`
+# leaves the venv's copies (e.g. anyio, the TLS-cert-spoofing CVE-2026-63374)
+# vulnerable. We upgrade the venv with `uv pip` (UV_NATIVE_TLS already makes it
+# eMudhra-safe). Guarded so bases without that venv are unaffected.
 RUN if [ -n "$PIP_UPGRADES" ]; then \
-        echo ">>> Upgrading Python packages: $PIP_UPGRADES" \
+        echo ">>> Upgrading Python packages (system interpreter): $PIP_UPGRADES" \
         && python -m pip install --no-cache-dir --upgrade $PIP_UPGRADES \
         && python -m pip cache purge >/dev/null 2>&1 || true ; \
+        if [ -x /usr/local/venv/bin/python ]; then \
+            echo ">>> Upgrading Python packages (agent-server venv /usr/local/venv): $PIP_UPGRADES" \
+            && uv pip install --no-cache --python /usr/local/venv/bin/python --upgrade $PIP_UPGRADES ; \
+        fi ; \
+        rm -rf /root/.cache/uv /root/.cache/uvx /home/*/.cache/uv 2>/dev/null || true ; \
     else \
         echo ">>> No PIP_UPGRADES specified; skipping Python upgrades." ; \
+    fi
+
+# ---- Make the Python TLS trust path eMudhra-clear --------------------------
+# Two things matter for certifi, and they are separate:
+#   (a) the recorded VERSION that scanners (Trivy) read, and
+#   (b) the actual CA bundle (`cacert.pem`) contents that TLS clients trust.
+#
+# For (a) we rely on UPSTREAM fixed versions rather than hand-editing metadata:
+#   - top-level `certifi`: pinned to 2026.10.19 via PIP_UPGRADES.
+#   - pip's VENDORED certifi (pip/_vendor/certifi, used for pip's own TLS):
+#     pip >= 26.2.2 already vendors certifi 2026.10.19 with consistent
+#     __version__ + vendor.txt + bom.cdx.json, so Trivy sees it as fixed. We do
+#     NOT copy/rewrite those files anymore; instead PIP_UPGRADES carries
+#     `pip==26.2.2` and the guard below fails the build if the vendored certifi
+#     is still older than 2026.10.19 (tells you to bump pip).
+#
+# For (b): even certifi 2026.10.19 only drops the ONE compromised root
+# "emSign ECC Root CA - G3" (GHSA-6q48-6c7w-9gw2) and STILL ships three other
+# eMudhra roots (emSign Root CA - G1 / C1, emSign ECC Root CA - C3). No certifi
+# version removes those, so `strip-emsign-certifi.py` strips the WHOLE emSign
+# family from each cacert.pem (top-level + vendored), matching the OS-store
+# distrust. This changes only cacert contents, not the version metadata.
+# Opt out of everything with KEEP_EMSIGN_ROOT.
+COPY overlays/strip-emsign-certifi.py /usr/local/share/strip-emsign-certifi.py
+RUN if [ -z "$KEEP_EMSIGN_ROOT" ]; then \
+        min="2026.10.19" ; \
+        realdir="$(python -c 'import os,certifi; print(os.path.dirname(certifi.__file__))' 2>/dev/null || true)" ; \
+        if [ -n "$realdir" ] && [ -d "$realdir" ]; then \
+            python /usr/local/share/strip-emsign-certifi.py "$realdir/cacert.pem" ; \
+        else \
+            echo ">>> no top-level certifi found; skipping its eMudhra strip." ; \
+        fi ; \
+        vend="$(python -c 'import importlib.util,os; s=importlib.util.find_spec("pip._vendor.certifi"); print(os.path.dirname(s.origin) if s and s.origin else "")' 2>/dev/null || true)" ; \
+        if [ -n "$vend" ] && [ -d "$vend" ]; then \
+            vv="$(python -c 'import pip._vendor.certifi as c; print(getattr(c,"__version__",""))' 2>/dev/null || true)" ; \
+            if [ -z "$vv" ] || [ "$(printf '%s\n%s\n' "$min" "$vv" | sort -V | head -1)" != "$min" ]; then \
+                echo "ERROR: pip-vendored certifi is '${vv:-unknown}' (< $min); add 'pip==26.2.2' (or newer) to PIP_UPGRADES so pip vendors a fixed certifi" >&2 ; exit 1 ; \
+            fi ; \
+            python /usr/local/share/strip-emsign-certifi.py "$vend/cacert.pem" ; \
+            echo ">>> pip-vendored certifi $vv is fixed (>= $min); emSign family stripped from its cacert." ; \
+        else \
+            echo ">>> pip has no vendored certifi; nothing to do for pip." ; \
+        fi ; \
+    else \
+        echo ">>> KEEP_EMSIGN_ROOT set; leaving certifi trust bundles untouched." ; \
     fi
 
 # ---- Remove unused openvscode-server language-only extensions --------------
@@ -95,17 +308,92 @@ RUN if [ -z "$KEEP_VSCODE_HANDLEBARS" ] && [ -d /openhands/.openvscode-server/ex
 # (empty).
 ARG STRIP_BROWSER_TOOLS=""
 RUN if [ -n "$STRIP_BROWSER_TOOLS" ]; then \
-        echo ">>> Stripping browser/VNC stack: chromium, tigervnc, novnc, x11-utils + transitive deps" \
-        && apt-get update -y \
-        && apt-get purge -y --auto-remove \
+        echo ">>> Stripping browser/VNC stack: chromium, tigervnc, novnc, x11-utils + transitive deps" ; \
+        apt-get update -y ; \
+        apt-get purge -y --auto-remove \
             chromium chromium-common \
             tigervnc-standalone-server tigervnc-common \
             novnc \
-            x11-utils \
-        && apt-get clean \
-        && rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/* ; \
+            x11-utils || true ; \
+        echo ">>> Stripping leftover XFCE/GTK desktop stack (used only by the VNC/browser GUI)." ; \
+        echo "    On older bases (e.g. agent-server 1.33.x) this desktop environment is installed" ; \
+        echo "    top-level, so the chromium/VNC autoremove above does NOT fully drag it out and" ; \
+        echo "    in particular leaves libxml2, whose CVE-2026-6653 currently has no apt fix — the" ; \
+        echo "    only remediation is removing the unused component (matches the repo policy)." ; \
+        echo "    Unconditional purge: apt-get purge is a harmless no-op for any of these that is" ; \
+        echo "    already gone (they are all real Debian packages, so no 'Unable to locate')." ; \
+        apt-get purge -y \
+            xfce4 xfce4-session xfce4-panel xfce4-settings xfce4-appfinder \
+            xfce4-pulseaudio-plugin xfwm4 xfdesktop4 thunar thunar-data exo-utils libexo-2-0 \
+            adwaita-icon-theme gtk-update-icon-cache libgtk-3-0t64 libgtk-3-common libgtk-layer-shell0 \
+            libdbusmenu-gtk3-4 libgarcon-gtk3-1-0 libwnck-3-0 libkeybinder-3.0-0 \
+            libnotify4 libxklavier16 shared-mime-info libgdk-pixbuf-2.0-0 \
+            libthunarx-3-0 libxfce4windowing-0-0 libxfce4panel-2.0-4 \
+            libxfce4ui-2-0 libxfce4ui-utils libxfce4ui-common \
+            libxml2 || true ; \
+        apt-get autoremove --purge -y ; \
+        if dpkg-query -W -f='${Status}\n' libxml2 2>/dev/null | grep -q 'install ok installed'; then \
+            echo "ERROR: libxml2 still installed after desktop strip (CVE-2026-6653 unfixed)" >&2 ; \
+            apt-cache rdepends --installed libxml2 2>/dev/null | sed 1d >&2 ; exit 1 ; \
+        fi ; \
+        echo ">>> Desktop/GTK stack and libxml2 removed (CVE-2026-6653 cleared)." ; \
+        apt-get clean ; \
+        rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/* ; \
     else \
         echo ">>> Keeping browser/VNC stack (set STRIP_BROWSER_TOOLS=1 to remove)." ; \
+    fi
+
+# ---- Optional: strip ONLY the VNC server + XFCE desktop, KEEP Chromium -----
+# Use this instead of STRIP_BROWSER_TOOLS when the agent's "browser" tool IS
+# needed (it drives a real headless Chromium) but the human-facing graphical
+# desktop is not. The upstream stack bundles two separable things:
+#
+#   1. Chromium + the libraries it links (libgtk-3, libnss3, Mesa/libgbm,
+#      fonts, libxml2 …) — REQUIRED for the browser tool.
+#   2. A TigerVNC server + noVNC web client + a full XFCE desktop environment
+#      — only there so a human can VNC-attach and watch a desktop. The agent's
+#      headless browser never uses any of it.
+#
+# Group (2) is pure dead weight when you only need headless browsing, and it
+# carries 2 of the 3 Criticals that the full STRIP_BROWSER_TOOLS removes:
+#
+#     CVE-2026-34352  tigervnc-common / tigervnc-standalone-server
+#     CVE-2026-1525   node-undici  (transitive of novnc → nodejs)
+#
+# This block purges group (2) and lets `apt-get autoremove --purge` drop its
+# now-orphaned transitive deps. Crucially it does NOT name chromium or any of
+# chromium's own dependencies (libgtk-3, libxml2, Mesa), so autoremove KEEPS
+# them (they are still required by the installed chromium package). A guard at
+# the end fails the build if chromium was removed by accident. Any Mesa
+# Critical (CVE-2026-40393) stays, because Mesa is a chromium dependency — that
+# is the accepted "minimal-impact" cost of keeping the browser tool.
+#
+# Mutually sensible with STRIP_BROWSER_TOOLS="" (keep chromium). Setting both
+# is contradictory; STRIP_BROWSER_TOOLS wins (chromium is already gone, so this
+# block's purge is a harmless no-op and the chromium guard is skipped).
+ARG STRIP_VNC_DESKTOP=""
+RUN if [ -n "$STRIP_VNC_DESKTOP" ] && [ -z "$STRIP_BROWSER_TOOLS" ]; then \
+        echo ">>> Removing VNC server + noVNC + XFCE desktop; KEEPING chromium for the browser tool." ; \
+        apt-get update -y ; \
+        apt-get purge -y \
+            tigervnc-standalone-server tigervnc-common \
+            novnc \
+            xfce4 xfce4-session xfce4-panel xfce4-settings xfce4-appfinder \
+            xfce4-pulseaudio-plugin xfwm4 xfdesktop4 thunar thunar-data exo-utils libexo-2-0 \
+            libgarcon-gtk3-1-0 libwnck-3-0 libkeybinder-3.0-0 libxklavier16 \
+            libthunarx-3-0 libxfce4windowing-0-0 libxfce4panel-2.0-4 \
+            libxfce4ui-2-0 libxfce4ui-utils libxfce4ui-common || true ; \
+        apt-get autoremove --purge -y ; \
+        if ! command -v chromium >/dev/null 2>&1 && [ ! -x /usr/bin/chromium ]; then \
+            echo "ERROR: chromium was removed by the VNC/desktop strip — the browser tool would break." >&2 ; exit 1 ; \
+        fi ; \
+        echo ">>> VNC/noVNC/XFCE removed (CVE-2026-34352 tigervnc + CVE-2026-1525 node-undici cleared); chromium retained at $(command -v chromium || echo /usr/bin/chromium)." ; \
+        apt-get clean ; \
+        rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/* ; \
+    elif [ -n "$STRIP_VNC_DESKTOP" ] && [ -n "$STRIP_BROWSER_TOOLS" ]; then \
+        echo ">>> STRIP_VNC_DESKTOP ignored: STRIP_BROWSER_TOOLS=1 already removed the whole browser/VNC stack." ; \
+    else \
+        echo ">>> Keeping VNC/desktop stack (set STRIP_VNC_DESKTOP=1 to remove it while keeping chromium)." ; \
     fi
 
 # ---- Optional: strip the embedded docker-in-docker stack ------------------
@@ -151,6 +439,36 @@ RUN if [ -n "$STRIP_DIND" ]; then \
         echo ">>> Keeping docker-in-docker stack (set STRIP_DIND=1 to remove)." ; \
     fi
 
+# ---- Optional: strip the C/C++ build toolchain (reaches Critical=0) ----------
+# The only remaining Critical in the slim image is CVE-2026-93221 in
+# `linux-libc-dev` — the Linux *kernel header* package. It has no upstream fix
+# and is not runtime-exploitable in a container (the container uses the HOST
+# kernel; these are just .h definitions used at compile time). Purging it
+# cascades (via `libc6-dev`) to the whole toolchain: build-essential, gcc/g++,
+# libc6-dev, libstdc++-dev.
+#
+# TRADE-OFF — default OFF on purpose: this is an AGENT SANDBOX. Agents commonly
+# `pip install` packages with native extensions or compile code at runtime, which
+# needs gcc/make/libc headers. Removing the toolchain to win a kernel-header CVE
+# that can't be exploited in-container is usually a BAD trade. Keep it off unless
+# you KNOW your workloads never compile at runtime; then set
+# STRIP_BUILD_TOOLCHAIN=1 for a true Critical=0 image.
+ARG STRIP_BUILD_TOOLCHAIN=""
+RUN if [ -n "$STRIP_BUILD_TOOLCHAIN" ]; then \
+        echo ">>> Stripping C/C++ build toolchain — purging linux-libc-dev lets apt cascade-remove its dependents (libc6-dev, build-essential, gcc/g++, libstdc++-dev). Removes runtime compilation capability; keeps the libstdc++6 RUNTIME lib." \
+        && apt-get update -y \
+        && apt-get purge -y linux-libc-dev \
+        && apt-get autoremove --purge -y \
+        && apt-get clean \
+        && rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/* ; \
+        if dpkg-query -W -f='${Package}\n' linux-libc-dev >/dev/null 2>&1; then \
+            echo "ERROR: linux-libc-dev still present after toolchain purge" >&2 ; exit 1 ; \
+        fi ; \
+        echo ">>> Build toolchain removed; linux-libc-dev gone (CVE-2026-93221 cleared)." ; \
+    else \
+        echo ">>> Keeping C/C++ build toolchain (set STRIP_BUILD_TOOLCHAIN=1 to remove; clears linux-libc-dev CVE-2026-93221 but disables runtime native compilation)." ; \
+    fi
+
 # ---- Replace older bundled Node 22 with the already-fixed system Node 22 --
 # `/opt/acp-node/bin/node` is a copy of Node 22.14.0 that the upstream image
 # bundles for the third-party Agent-Client-Protocol tools (gemini-cli,
@@ -171,4 +489,93 @@ RUN if [ -f /opt/acp-node/bin/node ] && [ -x /usr/local/bin/node ]; then \
         else \
             echo ">>> /opt/acp-node/bin/node already matches /usr/local/bin/node ($system_ver); no replacement needed." ; \
         fi ; \
+    fi
+
+# ---- Fix Critical CVEs in bundled npm toolchains and ACP agent CLIs --------
+# A fresh Trivy scan of the slim image flagged these bundled-npm Criticals:
+#
+#   @google/gemini-cli 0.38.0  CVE-2026-12537  RCE via workspace-trust bypass
+#                              (fixed 0.39.1) — /opt/acp-node global package
+#   tar (several copies)       CVE-2026-59873  gzip-bomb DoS (fixed 7.5.19) —
+#                              vendored inside each `npm` install
+#   proxy-addr 2.0.7           CVE-2026-90711  IP spoofing (fixed 2.0.8) —
+#                              nested under @agentclientprotocol/claude-agent-acp
+#
+# We fix them in place rather than stripping, because the ACP agent CLIs are a
+# product feature. Updating the bundled `npm` to a version that vendors
+# tar>=7.5.19 clears every `npm`-internal tar copy at once; gemini-cli is bumped
+# directly; proxy-addr is refreshed best-effort in the claude-agent-acp tree.
+#
+# Pins (verified present on the npm registry, 2026-10-22):
+#   npm 12.2.1 vendors tar ^7.5.22 (>= the 7.5.19 fix)
+#   @google/gemini-cli 0.39.1 is the minimum fixed release
+#
+# The downstream build.sh scan gate (POLICY_MAX_CRITICAL=0) is the backstop:
+# if any of these survive, the build fails there. Opt out with
+# `--build-arg KEEP_BUNDLED_NPM=1`.
+#   shell-quote 1.8.3         CVE-2026-9277   arbitrary code execution via
+#                              command injection (fixed 1.8.4) — bundled as a
+#                              leaf dep inside openvscode-server's node_modules
+#
+# shell-quote is a tiny pure-JS leaf package deduped deep in bundled trees, so
+# we replace every copy in place with the fixed tarball (npm pack just
+# downloads; it does not mutate the surrounding dependency tree).
+ARG KEEP_BUNDLED_NPM=""
+ARG NPM_PIN="12.2.1"
+ARG GEMINI_CLI_PIN="0.39.1"
+ARG PROXY_ADDR_PIN="2.0.8"
+ARG SHELL_QUOTE_PIN="1.12.0"
+RUN if [ -n "$KEEP_BUNDLED_NPM" ]; then \
+        echo ">>> KEEP_BUNDLED_NPM set; leaving bundled npm packages untouched." ; \
+    else \
+        set -e ; \
+        for npm_bin in /usr/local/bin/npm /opt/acp-node/bin/npm; do \
+            if [ -x "$npm_bin" ]; then \
+                echo ">>> Updating bundled npm at $npm_bin to $NPM_PIN (vendors tar>=7.5.19)" ; \
+                pkgdir="$(dirname "$(dirname "$npm_bin")")/lib/node_modules/npm" ; \
+                if [ ! -d "$pkgdir" ]; then \
+                    echo "ERROR: npm module dir not found at $pkgdir for $npm_bin" >&2 ; exit 1 ; \
+                fi ; \
+                tmp="$(mktemp -d)" ; \
+                ( cd "$tmp" && "$npm_bin" pack --silent "npm@${NPM_PIN}" ) ; \
+                tar -xzf "$tmp"/npm-*.tgz -C "$tmp" ; \
+                rm -rf "$pkgdir" && mkdir -p "$pkgdir" && cp -a "$tmp"/package/. "$pkgdir"/ ; \
+                rm -rf "$tmp" ; \
+                newver="$("$npm_bin" --version 2>/dev/null)" ; \
+                if [ "$newver" != "$NPM_PIN" ]; then \
+                    echo "ERROR: npm at $npm_bin is '$newver' after swap (expected $NPM_PIN)" >&2 ; exit 1 ; \
+                fi ; \
+                echo ">>> npm at $npm_bin swapped to $newver (tarball install; avoids broken in-place self-reify on older bases)" ; \
+            fi ; \
+        done ; \
+        if [ -x /opt/acp-node/bin/npm ]; then \
+            echo ">>> Updating @google/gemini-cli to $GEMINI_CLI_PIN (clears CVE-2026-12537 RCE)" ; \
+            /opt/acp-node/bin/npm install -g --no-audit --no-fund --force "@google/gemini-cli@${GEMINI_CLI_PIN}" ; \
+            if [ -d /opt/acp-node/lib/node_modules/@google/gemini-cli ]; then \
+                echo ">>> Also updating the bundled gemini-cli under /opt/acp-node prefix (where ACP tools resolve it)" ; \
+                /opt/acp-node/bin/npm install -g --prefix /opt/acp-node --no-audit --no-fund --force "@google/gemini-cli@${GEMINI_CLI_PIN}" ; \
+            fi ; \
+        fi ; \
+        acp_dir=/opt/acp-node/lib/node_modules/@agentclientprotocol/claude-agent-acp ; \
+        if [ -d "$acp_dir" ]; then \
+            echo ">>> Refreshing proxy-addr to $PROXY_ADDR_PIN under claude-agent-acp (best-effort)" ; \
+            ( cd "$acp_dir" && /opt/acp-node/bin/npm install --no-save --no-audit --no-fund "proxy-addr@${PROXY_ADDR_PIN}" ) \
+                || echo ">>> WARN: proxy-addr refresh did not complete; scan gate will confirm final state." ; \
+        fi ; \
+        npm_for_pack="$(command -v npm || echo /usr/local/bin/npm)" ; \
+        for pj in $(find / -path '*/node_modules/shell-quote/package.json' 2>/dev/null); do \
+            d="$(dirname "$pj")" ; \
+            echo ">>> Replacing bundled shell-quote in $d with ${SHELL_QUOTE_PIN} (clears CVE-2026-9277)" ; \
+            tmp="$(mktemp -d)" ; \
+            ( cd "$tmp" && "$npm_for_pack" pack --silent "shell-quote@${SHELL_QUOTE_PIN}" >/dev/null ) \
+            && tar -xzf "$tmp"/shell-quote-*.tgz -C "$tmp" \
+            && rm -rf "$d"/* \
+            && cp -a "$tmp"/package/. "$d"/ \
+            && rm -rf "$tmp" \
+            || { echo "ERROR: failed to replace shell-quote in $d" >&2 ; exit 1 ; } ; \
+        done ; \
+        ( /usr/local/bin/npm cache clean --force >/dev/null 2>&1 || true ) ; \
+        ( /opt/acp-node/bin/npm cache clean --force >/dev/null 2>&1 || true ) ; \
+        rm -rf /root/.npm ; \
+        echo ">>> Bundled npm CVE fixes applied." ; \
     fi
