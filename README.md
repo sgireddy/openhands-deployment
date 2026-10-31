@@ -679,6 +679,44 @@ To rebuild without one of the strips later, omit that specific build-arg
 or pass it empty (`--build-arg STRIP_BROWSER_TOOLS=`,
 `--build-arg STRIP_DIND=`).
 
+#### `agent-server:custom_base-browser` — KEEP Chromium, strip only the VNC desktop
+
+If your conversations **do** need the agent's browser tool, do **not** use
+`STRIP_BROWSER_TOOLS=1` — that removes Chromium, and new conversations then
+fail at startup with *"Chromium is required for browser operations but is not
+installed."* Instead use `STRIP_VNC_DESKTOP=1`, which keeps Chromium (and the
+libraries it links) but removes the genuinely-unused human-facing graphical
+stack: the TigerVNC server, the noVNC web client, and the full XFCE desktop.
+
+```bash
+docker buildx build \
+    --file overlays/Dockerfile.agent-server \
+    --platform linux/amd64,linux/arm64 \
+    --build-arg BASE_IMAGE=ghcr.io/openhands/agent-server:1.33.0-python@sha256:9b96c86134d74cf9ad4846ab288af7ebcbb4423559c38e314ff922761d1c1e4d \
+    --build-arg PIP_UPGRADES="pip==26.2.2 certifi==2026.10.19 anyio==4.14.2 litellm==1.93.2" \
+    --build-arg STRIP_VNC_DESKTOP=1 \
+    --build-arg STRIP_DIND=1 \
+    --build-arg STRIP_BUILD_TOOLCHAIN=1 \
+    --provenance=false \
+    --tag <your-registry>/agent-server:custom_base-browser \
+    --tag <your-registry>/agent-server:custom_base-browser-1.33.0 \
+    --push .
+```
+
+`STRIP_VNC_DESKTOP=1` clears two of the three Criticals that the full browser
+strip removes — `CVE-2026-34352` (tigervnc) and `CVE-2026-1525` (node-undici,
+via noVNC) — because neither the VNC server nor noVNC is used by the agent's
+headless Chromium. A build-time guard fails the build if Chromium is removed by
+accident, and `STRIP_VNC_DESKTOP` is ignored if `STRIP_BROWSER_TOOLS=1` is also
+set (Chromium is already gone).
+
+**CVE cost of keeping Chromium:** this image is **not** Critical=0. Trivy
+reports exactly one Critical — `libxml2 CVE-2026-6653`, an **unfixable**
+(no upstream fix) denial-of-service via crafted XML. `libxml2` is a mandatory
+Chromium dependency, so the only way to reach Critical=0 is to drop Chromium
+entirely (the slim variant). This single unfixable DoS is the floor for any
+Chromium-capable image.
+
 #### `openhands:custom_base-slim` — strip VS Code extension build sandbox + bump litellm/lxml
 
 The upstream `openhands` web image ships the source tree of the

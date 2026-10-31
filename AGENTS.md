@@ -552,6 +552,18 @@ when the scan gate is run with fixed-only filtering; keep the default
 - **Use `apt-get autoremove --purge`** after a purge so transitive
   deps come out too (this is how Mesa/X11/freedesktop libs got cleared
   in the agent-server slim variant — they were transitive of `x11-utils`).
+- **Browser tool needs Chromium.** The agent's browser tool drives the
+  system `/usr/bin/chromium` (base sets `PUPPETEER_EXECUTABLE_PATH`; no
+  `ms-playwright` cache). `STRIP_BROWSER_TOOLS=1` deletes that binary, so
+  new conversations hard-fail at startup: *"Chromium is required for
+  browser operations but is not installed."* If browsing is needed, build
+  with `STRIP_VNC_DESKTOP=1` instead (keeps Chromium; removes only the
+  unused TigerVNC/noVNC/XFCE desktop). This clears the tigervnc
+  (CVE-2026-34352) and node-undici (CVE-2026-1525) Criticals but leaves
+  **libxml2 CVE-2026-6653** (unfixable DoS) because libxml2 is a Chromium
+  dependency — that one Critical is the floor for any browser-capable
+  image. Tag: `custom_base-browser-1.33.0`. Verified: chromium launches
+  headless, VNC/XFCE gone, Trivy = 1C (libxml2 only).
 - **`/usr/local/bin/node`** (bundled by openvscode-server, v22) is
   independent of Debian's `/usr/bin/node` (v20). Removing the system
   Node 20 does NOT break the embedded VS Code.
@@ -584,7 +596,8 @@ when the scan gate is run with fixed-only filtering; keep the default
 | `sgireddy/agent-server:custom_base-1.19.1`       | `8e88e6506cca…`             | (alias of regular)                                   |
 | `sgireddy/agent-server:custom_base-slim`         | `844840c105c8…`             | no chromium/VNC/Mesa + no DinD + node 22.22 symlink  |
 | `sgireddy/agent-server:custom_base-slim-1.19.1`  | `844840c105c8…`             | (alias of slim)                                      |
-| `sgireddy/agent-server:custom_base-slim-0c-1.33.0` | `3eadbc3f6c8d…`           | 0-Critical, emSign-clean; **version-matched to app 1.10.0's bundled agent-server 1.33.0** (avoids ConversationInfo schema skew) |
+| `sgireddy/agent-server:custom_base-slim-0c-1.33.0` | `3eadbc3f6c8d…`           | 0-Critical, emSign-clean; **version-matched to app 1.10.0's bundled agent-server 1.33.0** (avoids ConversationInfo schema skew). NO Chromium — browser tool fails. |
+| `sgireddy/agent-server:custom_base-browser-1.33.0` | *(pending first push)*    | **Keeps Chromium** (browser tool works); strips only VNC/noVNC/XFCE + DinD + toolchain. 1 Critical: libxml2 CVE-2026-6653 (unfixable DoS, a Chromium dep). version-matched to app 1.33.0. |
 
 Per-arch digests for `custom_base-slim-0c-1.33.0` (`3eadbc3f6c8d…`):
 - `linux/amd64` → `sha256:74d1c41f7946…`
