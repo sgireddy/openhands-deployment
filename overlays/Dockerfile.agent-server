@@ -36,6 +36,29 @@ LABEL org.opencontainers.image.title="agent-server-hardened" \
 # The agent-server image typically runs as root to support sandbox operations
 # (chrooted filesystem ops, package installs, etc.) so we don't drop privs.
 USER root
+
+# The upstream base pins apt to a FROZEN Debian snapshot (snapshot.debian.org,
+# e.g. .../archive/debian/20261019T.../) for reproducible builds. That freeze
+# means `apt-get upgrade` can NEVER see security fixes published after the
+# snapshot date — so Critical OS CVEs with an available deb13uX fix (libbrotli1,
+# gnutls, perl, openssl, ...) stay unpatched no matter how often we rebuild.
+# To meet the Critical=0 goal we repoint the snapshot URIs to the LIVE Debian +
+# security mirrors before upgrading, so the newest published fixes are pulled.
+# Set APT_SNAPSHOT_OVERRIDE="" to keep the base's frozen snapshot (reproducible
+# but potentially behind on security).
+ARG APT_SNAPSHOT_OVERRIDE=1
+RUN if [ -n "$APT_SNAPSHOT_OVERRIDE" ]; then \
+        echo ">>> Repointing frozen Debian snapshot -> live mirrors for current security fixes" ; \
+        for f in /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources; do \
+            [ -e "$f" ] || continue ; \
+            sed -i -E \
+              -e 's#https?://snapshot\.debian\.org/archive/debian-security/[0-9TZ]+/?#http://security.debian.org/debian-security/#g' \
+              -e 's#https?://snapshot\.debian\.org/archive/debian/[0-9TZ]+/?#http://deb.debian.org/debian/#g' \
+              "$f" ; \
+        done ; \
+    else \
+        echo ">>> Keeping base's frozen apt snapshot (APT_SNAPSHOT_OVERRIDE empty)." ; \
+    fi
 RUN apt-get update -y \
     && apt-get -y upgrade \
     && apt-get -y autoremove --purge \
@@ -95,10 +118,46 @@ RUN if [ -z "$KEEP_EMSIGN_ROOT" ]; then \
 # KEEP_EMSIGN_ROOT=1 to opt out (keeps uv on its vendored bundle).
 ENV UV_NATIVE_TLS=1
 ARG UV_MIN_VERSION=0.13.4
+# Remediation (not just detection): bases older than uv 0.13.4 (e.g. the
+# agent-server <= 1.33.x line ships uv 0.11.x) carry a vendored webpki bundle
+# that still trusts the compromised emSign/eMudhra roots, AND scanners match the
+# advisory (GHSA-hq85-5cpj-mr62) on the recorded uv version. UV_NATIVE_TLS=1
+# already routes uv around the vendored bundle at runtime, but to also clear the
+# scanner finding we replace the uv binary with a pinned, checksum-verified
+# upstream build from astral-sh's official GitHub release. A `pip install uv` can
+# NOT do this (uv is a standalone musl binary, not a pip package). Idempotent:
+# runs only when the on-disk uv is below UV_MIN_VERSION.
+ARG TARGETARCH
+ARG UV_UPGRADE_VERSION=0.13.6
 RUN if [ -z "$KEEP_EMSIGN_ROOT" ]; then \
         uvbin="$(command -v uv || true)" ; \
         if [ -n "$uvbin" ]; then \
             uvver="$("$uvbin" --version 2>/dev/null | awk '{print $2}')" ; \
+            if [ -z "$uvver" ] || [ "$(printf '%s\n%s\n' "$UV_MIN_VERSION" "$uvver" | sort -V | head -1)" != "$UV_MIN_VERSION" ]; then \
+                echo ">>> Upgrading uv ${uvver:-unknown} -> ${UV_UPGRADE_VERSION} (base uv < ${UV_MIN_VERSION}; clears emSign in uv's vendored webpki bundle, GHSA-hq85-5cpj-mr62)" ; \
+                case "$TARGETARCH" in \
+                    amd64) triple="x86_64-unknown-linux-musl" ;; \
+                    arm64) triple="aarch64-unknown-linux-musl" ;; \
+                    *) echo "ERROR: unsupported TARGETARCH='$TARGETARCH' for uv upgrade" >&2 ; exit 1 ;; \
+                esac ; \
+                url="https://github.com/astral-sh/uv/releases/download/${UV_UPGRADE_VERSION}/uv-${triple}.tar.gz" ; \
+                tmp="$(mktemp -d)" ; \
+                curl -fsSL "$url" -o "$tmp/uv.tar.gz" ; \
+                curl -fsSL "${url}.sha256" -o "$tmp/uv.tar.gz.sha256" ; \
+                expected="$(awk '{print $1}' "$tmp/uv.tar.gz.sha256")" ; \
+                actual="$(sha256sum "$tmp/uv.tar.gz" | awk '{print $1}')" ; \
+                if [ "$expected" != "$actual" ]; then \
+                    echo "ERROR: uv ${UV_UPGRADE_VERSION} checksum mismatch (expected ${expected}, got ${actual})" >&2 ; exit 1 ; \
+                fi ; \
+                tar -xzf "$tmp/uv.tar.gz" -C "$tmp" ; \
+                install -m 0755 "$tmp/uv-${triple}/uv" "$uvbin" ; \
+                if [ -e "$tmp/uv-${triple}/uvx" ] && [ -e "$(dirname "$uvbin")/uvx" ]; then \
+                    install -m 0755 "$tmp/uv-${triple}/uvx" "$(dirname "$uvbin")/uvx" ; \
+                fi ; \
+                rm -rf "$tmp" ; \
+                uvver="$("$uvbin" --version 2>/dev/null | awk '{print $2}')" ; \
+                echo ">>> uv upgraded in place to ${uvver}" ; \
+            fi ; \
             echo ">>> uv at $uvbin (version ${uvver:-unknown}) will use native TLS (cleaned OS store)" ; \
             if grep -qi emSign /etc/ssl/certs/ca-certificates.crt 2>/dev/null; then \
                 echo "ERROR: OS trust bundle still contains emSign; uv native-TLS would trust it" >&2 ; exit 1 ; \
@@ -115,11 +174,20 @@ RUN if [ -z "$KEEP_EMSIGN_ROOT" ]; then \
     fi
 
 # ---- Optional: Python package upgrades -------------------------------------
-# We don't assume a specific venv layout — use whichever `python` is on PATH.
+# Apply to BOTH the interpreter on PATH AND the agent-server's own venv. The
+# agent-server runs from a uv-managed venv at /usr/local/venv, which the default
+# `python` (/usr/local/lib/python3.13) does NOT cover — so a plain `pip install`
+# leaves the venv's copies (e.g. anyio, the TLS-cert-spoofing CVE-2026-63374)
+# vulnerable. We upgrade the venv with `uv pip` (UV_NATIVE_TLS already makes it
+# eMudhra-safe). Guarded so bases without that venv are unaffected.
 RUN if [ -n "$PIP_UPGRADES" ]; then \
-        echo ">>> Upgrading Python packages: $PIP_UPGRADES" \
+        echo ">>> Upgrading Python packages (system interpreter): $PIP_UPGRADES" \
         && python -m pip install --no-cache-dir --upgrade $PIP_UPGRADES \
         && python -m pip cache purge >/dev/null 2>&1 || true ; \
+        if [ -x /usr/local/venv/bin/python ]; then \
+            echo ">>> Upgrading Python packages (agent-server venv /usr/local/venv): $PIP_UPGRADES" \
+            && uv pip install --python /usr/local/venv/bin/python --upgrade $PIP_UPGRADES ; \
+        fi ; \
     else \
         echo ">>> No PIP_UPGRADES specified; skipping Python upgrades." ; \
     fi
@@ -364,12 +432,29 @@ RUN if [ -n "$KEEP_BUNDLED_NPM" ]; then \
         for npm_bin in /usr/local/bin/npm /opt/acp-node/bin/npm; do \
             if [ -x "$npm_bin" ]; then \
                 echo ">>> Updating bundled npm at $npm_bin to $NPM_PIN (vendors tar>=7.5.19)" ; \
-                "$npm_bin" install -g --no-audit --no-fund "npm@${NPM_PIN}" ; \
+                pkgdir="$(dirname "$(dirname "$npm_bin")")/lib/node_modules/npm" ; \
+                if [ ! -d "$pkgdir" ]; then \
+                    echo "ERROR: npm module dir not found at $pkgdir for $npm_bin" >&2 ; exit 1 ; \
+                fi ; \
+                tmp="$(mktemp -d)" ; \
+                ( cd "$tmp" && "$npm_bin" pack --silent "npm@${NPM_PIN}" ) ; \
+                tar -xzf "$tmp"/npm-*.tgz -C "$tmp" ; \
+                rm -rf "$pkgdir" && mkdir -p "$pkgdir" && cp -a "$tmp"/package/. "$pkgdir"/ ; \
+                rm -rf "$tmp" ; \
+                newver="$("$npm_bin" --version 2>/dev/null)" ; \
+                if [ "$newver" != "$NPM_PIN" ]; then \
+                    echo "ERROR: npm at $npm_bin is '$newver' after swap (expected $NPM_PIN)" >&2 ; exit 1 ; \
+                fi ; \
+                echo ">>> npm at $npm_bin swapped to $newver (tarball install; avoids broken in-place self-reify on older bases)" ; \
             fi ; \
         done ; \
         if [ -x /opt/acp-node/bin/npm ]; then \
             echo ">>> Updating @google/gemini-cli to $GEMINI_CLI_PIN (clears CVE-2026-12537 RCE)" ; \
-            /opt/acp-node/bin/npm install -g --no-audit --no-fund "@google/gemini-cli@${GEMINI_CLI_PIN}" ; \
+            /opt/acp-node/bin/npm install -g --no-audit --no-fund --force "@google/gemini-cli@${GEMINI_CLI_PIN}" ; \
+            if [ -d /opt/acp-node/lib/node_modules/@google/gemini-cli ]; then \
+                echo ">>> Also updating the bundled gemini-cli under /opt/acp-node prefix (where ACP tools resolve it)" ; \
+                /opt/acp-node/bin/npm install -g --prefix /opt/acp-node --no-audit --no-fund --force "@google/gemini-cli@${GEMINI_CLI_PIN}" ; \
+            fi ; \
         fi ; \
         acp_dir=/opt/acp-node/lib/node_modules/@agentclientprotocol/claude-agent-acp ; \
         if [ -d "$acp_dir" ]; then \
