@@ -503,6 +503,48 @@ when the scan gate is run with fixed-only filtering; keep the default
 
 ## Known-good patterns
 
+- **Match the agent-server image to the app's BUNDLED version.** The app
+  (`openhands` image) ships a pinned `openhands-agent-server` (check with
+  `docker exec <app> /app/.venv/bin/python -c 'import importlib.metadata as m;
+  print(m.version("openhands-agent-server"))'`). The sandbox agent-server
+  image MUST be **<= that version** (ideally ==). A NEWER agent-server returns
+  a `ConversationInfo` JSON with fields the app's older pydantic model rejects
+  (`extra_forbidden`, e.g. `agent.mcp_config.default.enabled`), so every
+  conversation start dies at
+  `live_status_app_conversation_service.py:_start_app_conversation` ->
+  `ConversationInfo.model_validate`. Symptom: HTTP 200 on create, then
+  "Error starting conversation" with a pydantic ValidationError. app 1.10.0
+  bundles agent-server **1.33.0** -> build `custom_base-slim-0c-1.33.0`.
+- **Older agent-server bases (1.33.x) are dirtier than 1.58.x** and need two
+  extra fixes the 1.58.1 build never exercised:
+  1. **uv lives in TWO places** (`/usr/local/bin` AND `/usr/bin`) and is uv
+     **0.11.x** (base). The old binary-swap only touched `command -v uv` (one
+     path) and left a stale `uv-*.dist-info` METADATA -> Trivy flagged uv
+     `GHSA-hq85-5cpj-mr62` (emSign) + vendored `zip` `CVE-2026-115905`. The
+     overlay now enumerates the whole FS, replaces every `uv` below
+     `UV_MIN_VERSION`, removes stale `uv-*.dist-info`, and purges `/root/.cache/uv`.
+  2. **`uvx` is a thin shim** that reports the *uv* binary's `--version`. After
+     uv is upgraded, `uvx --version` prints the NEW version, so a version-gated
+     check skips the stale uvx shim — whose OWN embedded crates still vendor the
+     vulnerable `zip`. Fix: replace `uvx` by **content** (`cmp -s` vs the pinned
+     tarball), never by `--version`.
+- **Pin uv to 0.13.5, NOT 0.13.6.** The official **0.13.6 `uvx`** binary is
+  flagged for vendored `zip` 8.1.0 (CVE-2026-115905); **0.13.5**'s uvx is clean
+  (it is the version proven 0C in the 1.58.1 slim image). Both are
+  >= UV_MIN_VERSION so the emSign fix still holds. (`UV_UPGRADE_VERSION=0.13.5`.)
+- **`STRIP_BROWSER_TOOLS` now also purges the XFCE/GTK desktop stack.** On the
+  1.33.x base the desktop environment (`xfce4*`, `thunar`, `libgtk-3-*`,
+  `shared-mime-info`, `libxklavier16`, ... ~29 pkgs) is installed TOP-LEVEL, so
+  the chromium/VNC `--auto-remove` does not drag it out. It carries **libxml2**,
+  whose **CVE-2026-6653 has no apt fix** -> the only remediation is removing the
+  unused component. The overlay does an unconditional `apt-get purge` of the
+  desktop set + `libxml2` (purge is a harmless no-op for already-absent known
+  packages), then `autoremove --purge`, then asserts libxml2 is gone. 1.58.1 has
+  no libxml2 at all (newer base), which is why it was 0C without this step.
+- **Known-clean agent-server 1.33.0:** `custom_base-slim-0c-1.33.0`, verified
+  Trivy CRITICAL=0 (arm64 native), emSign=0 in OS store + certifi, libxml2
+  removed, uv/uvx 0.13.5, `UV_NATIVE_TLS=1`.
+
 - **Strip unused embedded stacks** rather than chasing upstream-no-fix
   CVEs. Pattern: add `ARG STRIP_X=""` to overlay; when set, run
   `apt-get purge --auto-remove` for the unused package set.
