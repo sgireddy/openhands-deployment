@@ -120,55 +120,79 @@ ENV UV_NATIVE_TLS=1
 ARG UV_MIN_VERSION=0.13.4
 # Remediation (not just detection): bases older than uv 0.13.4 (e.g. the
 # agent-server <= 1.33.x line ships uv 0.11.x) carry a vendored webpki bundle
-# that still trusts the compromised emSign/eMudhra roots, AND scanners match the
-# advisory (GHSA-hq85-5cpj-mr62) on the recorded uv version. UV_NATIVE_TLS=1
-# already routes uv around the vendored bundle at runtime, but to also clear the
-# scanner finding we replace the uv binary with a pinned, checksum-verified
-# upstream build from astral-sh's official GitHub release. A `pip install uv` can
-# NOT do this (uv is a standalone musl binary, not a pip package). Idempotent:
-# runs only when the on-disk uv is below UV_MIN_VERSION.
+# that still trusts the compromised emSign/eMudhra roots (GHSA-hq85-5cpj-mr62),
+# and the same old uv binary vendors a vulnerable `zip` Rust crate
+# (CVE-2026-115905, fixed in zip 9.0.5 / shipped by current uv). UV_NATIVE_TLS=1
+# already routes uv around the vendored CA bundle at runtime, but to also clear
+# the scanner findings we replace EVERY uv/uvx binary below UV_MIN_VERSION with a
+# pinned, checksum-verified upstream build from astral-sh's official GitHub
+# release, and we remove any stale `uv-*.dist-info` python-package metadata (the
+# uv wheel is just a binary + dist-info; nothing imports it at runtime). A
+# `pip install uv` can NOT fix the binaries (uv is a standalone musl binary).
+# NOTE: older bases ship uv in MULTIPLE locations (e.g. /usr/local/bin AND
+# /usr/bin); the first `command -v uv` is not enough, so we enumerate the whole
+# filesystem. Idempotent: only touches uv artifacts below UV_MIN_VERSION.
 ARG TARGETARCH
-ARG UV_UPGRADE_VERSION=0.13.6
+# 0.13.5 (not .6): the official 0.13.6 `uvx` binary is flagged by scanners for a
+# vendored `zip` 8.1.0 (CVE-2026-115905); 0.13.5's uvx is clean and is the
+# version proven 0-Critical in the 1.58.1 slim image. Both are >= UV_MIN_VERSION
+# so the emSign fix (GHSA-hq85-5cpj-mr62) still holds.
+ARG UV_UPGRADE_VERSION=0.13.5
 RUN if [ -z "$KEEP_EMSIGN_ROOT" ]; then \
-        uvbin="$(command -v uv || true)" ; \
-        if [ -n "$uvbin" ]; then \
-            uvver="$("$uvbin" --version 2>/dev/null | awk '{print $2}')" ; \
-            if [ -z "$uvver" ] || [ "$(printf '%s\n%s\n' "$UV_MIN_VERSION" "$uvver" | sort -V | head -1)" != "$UV_MIN_VERSION" ]; then \
-                echo ">>> Upgrading uv ${uvver:-unknown} -> ${UV_UPGRADE_VERSION} (base uv < ${UV_MIN_VERSION}; clears emSign in uv's vendored webpki bundle, GHSA-hq85-5cpj-mr62)" ; \
-                case "$TARGETARCH" in \
-                    amd64) triple="x86_64-unknown-linux-musl" ;; \
-                    arm64) triple="aarch64-unknown-linux-musl" ;; \
-                    *) echo "ERROR: unsupported TARGETARCH='$TARGETARCH' for uv upgrade" >&2 ; exit 1 ;; \
-                esac ; \
-                url="https://github.com/astral-sh/uv/releases/download/${UV_UPGRADE_VERSION}/uv-${triple}.tar.gz" ; \
-                tmp="$(mktemp -d)" ; \
-                curl -fsSL "$url" -o "$tmp/uv.tar.gz" ; \
-                curl -fsSL "${url}.sha256" -o "$tmp/uv.tar.gz.sha256" ; \
-                expected="$(awk '{print $1}' "$tmp/uv.tar.gz.sha256")" ; \
-                actual="$(sha256sum "$tmp/uv.tar.gz" | awk '{print $1}')" ; \
-                if [ "$expected" != "$actual" ]; then \
-                    echo "ERROR: uv ${UV_UPGRADE_VERSION} checksum mismatch (expected ${expected}, got ${actual})" >&2 ; exit 1 ; \
-                fi ; \
-                tar -xzf "$tmp/uv.tar.gz" -C "$tmp" ; \
-                install -m 0755 "$tmp/uv-${triple}/uv" "$uvbin" ; \
-                if [ -e "$tmp/uv-${triple}/uvx" ] && [ -e "$(dirname "$uvbin")/uvx" ]; then \
-                    install -m 0755 "$tmp/uv-${triple}/uvx" "$(dirname "$uvbin")/uvx" ; \
-                fi ; \
-                rm -rf "$tmp" ; \
-                uvver="$("$uvbin" --version 2>/dev/null | awk '{print $2}')" ; \
-                echo ">>> uv upgraded in place to ${uvver}" ; \
-            fi ; \
-            echo ">>> uv at $uvbin (version ${uvver:-unknown}) will use native TLS (cleaned OS store)" ; \
-            if grep -qi emSign /etc/ssl/certs/ca-certificates.crt 2>/dev/null; then \
-                echo "ERROR: OS trust bundle still contains emSign; uv native-TLS would trust it" >&2 ; exit 1 ; \
-            fi ; \
-            if [ -z "$uvver" ] || [ "$(printf '%s\n%s\n' "$UV_MIN_VERSION" "$uvver" | sort -V | head -1)" != "$UV_MIN_VERSION" ]; then \
-                echo "ERROR: base uv is '${uvver:-unknown}' (< $UV_MIN_VERSION); its vendored webpki bundle still trusts the compromised emSign ECC Root CA - G3 (GHSA-hq85-5cpj-mr62). Upgrade the base image's uv to >= $UV_MIN_VERSION." >&2 ; exit 1 ; \
-            fi ; \
-            echo ">>> uv ${uvver} is >= $UV_MIN_VERSION (GHSA-hq85-5cpj-mr62 fixed); native TLS also routes it around the residual emSign family." ; \
+        set -e ; \
+        case "$TARGETARCH" in \
+            amd64|"") triple="x86_64-unknown-linux-musl" ;; \
+            arm64) triple="aarch64-unknown-linux-musl" ;; \
+            *) echo "ERROR: unsupported TARGETARCH='$TARGETARCH' for uv upgrade" >&2 ; exit 1 ;; \
+        esac ; \
+        below_min() { [ -z "$1" ] || [ "$(printf '%s\n%s\n' "$UV_MIN_VERSION" "$1" | sort -V | head -1)" != "$UV_MIN_VERSION" ]; } ; \
+        need=0 ; \
+        for b in $(find / -type f \( -name uv -o -name uvx \) 2>/dev/null); do \
+            v="$("$b" --version 2>/dev/null | awk '/^uvx? /{print $2}')" ; \
+            [ -n "$v" ] || continue ; if below_min "$v"; then need=1 ; fi ; \
+        done ; \
+        for m in $(find / -path '*/uv-*.dist-info' -type d 2>/dev/null); do \
+            dv="$(basename "$m" | sed -E 's/^uv-([0-9][0-9A-Za-z.]*)\.dist-info$/\1/')" ; \
+            if below_min "$dv"; then need=1 ; fi ; \
+        done ; \
+        if [ "$need" = "1" ]; then \
+            echo ">>> Replacing all uv/uvx < ${UV_MIN_VERSION} with ${UV_UPGRADE_VERSION} (GHSA-hq85-5cpj-mr62 emSign + vendored zip CVE-2026-115905)" ; \
+            url="https://github.com/astral-sh/uv/releases/download/${UV_UPGRADE_VERSION}/uv-${triple}.tar.gz" ; \
+            tmp="$(mktemp -d)" ; \
+            curl -fsSL "$url" -o "$tmp/uv.tar.gz" ; \
+            curl -fsSL "${url}.sha256" -o "$tmp/uv.tar.gz.sha256" ; \
+            expected="$(awk '{print $1}' "$tmp/uv.tar.gz.sha256")" ; \
+            actual="$(sha256sum "$tmp/uv.tar.gz" | awk '{print $1}')" ; \
+            [ "$expected" = "$actual" ] || { echo "ERROR: uv ${UV_UPGRADE_VERSION} checksum mismatch (expected ${expected}, got ${actual})" >&2 ; exit 1 ; } ; \
+            tar -xzf "$tmp/uv.tar.gz" -C "$tmp" ; \
+            for b in $(find / -type f -name uv 2>/dev/null); do \
+                v="$("$b" --version 2>/dev/null | awk '/^uv /{print $2}')" ; \
+                [ -n "$v" ] || continue ; if below_min "$v"; then \
+                    echo "    replacing $b ($v -> ${UV_UPGRADE_VERSION})" ; install -m 0755 "$tmp/uv-${triple}/uv" "$b" ; fi ; \
+            done ; \
+            for b in $(find / -type f -name uvx 2>/dev/null); do \
+                if ! cmp -s "$tmp/uv-${triple}/uvx" "$b"; then \
+                    echo "    replacing uvx $b -> pinned ${UV_UPGRADE_VERSION} (uvx is a thin shim that reports the uv binary's --version, so it is replaced by content, not version: the stale shim still vendors a vulnerable zip crate, CVE-2026-115905)" ; \
+                    install -m 0755 "$tmp/uv-${triple}/uvx" "$b" ; fi ; \
+            done ; \
+            for m in $(find / -path '*/uv-*.dist-info' -type d 2>/dev/null); do \
+                dv="$(basename "$m" | sed -E 's/^uv-([0-9][0-9A-Za-z.]*)\.dist-info$/\1/')" ; \
+                if below_min "$dv"; then echo "    removing stale uv dist-info $m ($dv)" ; rm -rf "$m" ; fi ; \
+            done ; \
+            rm -rf "$tmp" ; \
         else \
-            echo ">>> no uv binary present; UV_NATIVE_TLS set for any later uv." ; \
+            echo ">>> all uv/uvx already >= ${UV_MIN_VERSION}; nothing to replace." ; \
         fi ; \
+        rm -rf /root/.cache/uv /root/.cache/uvx /home/*/.cache/uv 2>/dev/null || true ; \
+        if grep -qi emSign /etc/ssl/certs/ca-certificates.crt 2>/dev/null; then \
+            echo "ERROR: OS trust bundle still contains emSign; uv native-TLS would trust it" >&2 ; exit 1 ; \
+        fi ; \
+        for b in $(find / -type f \( -name uv -o -name uvx \) 2>/dev/null); do \
+            v="$("$b" --version 2>/dev/null | awk '/^uvx? /{print $2}')" ; \
+            [ -n "$v" ] || continue ; if below_min "$v"; then \
+                echo "ERROR: $b still at '$v' (< $UV_MIN_VERSION) after upgrade" >&2 ; exit 1 ; fi ; \
+        done ; \
+        echo ">>> All uv/uvx >= ${UV_MIN_VERSION}; stale uv dist-info removed; uv cache purged; UV_NATIVE_TLS=1 routes TLS through the cleaned OS store." ; \
     else \
         echo ">>> KEEP_EMSIGN_ROOT set; leaving uv on its vendored webpki bundle." ; \
     fi
@@ -186,8 +210,9 @@ RUN if [ -n "$PIP_UPGRADES" ]; then \
         && python -m pip cache purge >/dev/null 2>&1 || true ; \
         if [ -x /usr/local/venv/bin/python ]; then \
             echo ">>> Upgrading Python packages (agent-server venv /usr/local/venv): $PIP_UPGRADES" \
-            && uv pip install --python /usr/local/venv/bin/python --upgrade $PIP_UPGRADES ; \
+            && uv pip install --no-cache --python /usr/local/venv/bin/python --upgrade $PIP_UPGRADES ; \
         fi ; \
+        rm -rf /root/.cache/uv /root/.cache/uvx /home/*/.cache/uv 2>/dev/null || true ; \
     else \
         echo ">>> No PIP_UPGRADES specified; skipping Python upgrades." ; \
     fi
@@ -283,15 +308,37 @@ RUN if [ -z "$KEEP_VSCODE_HANDLEBARS" ] && [ -d /openhands/.openvscode-server/ex
 # (empty).
 ARG STRIP_BROWSER_TOOLS=""
 RUN if [ -n "$STRIP_BROWSER_TOOLS" ]; then \
-        echo ">>> Stripping browser/VNC stack: chromium, tigervnc, novnc, x11-utils + transitive deps" \
-        && apt-get update -y \
-        && apt-get purge -y --auto-remove \
+        echo ">>> Stripping browser/VNC stack: chromium, tigervnc, novnc, x11-utils + transitive deps" ; \
+        apt-get update -y ; \
+        apt-get purge -y --auto-remove \
             chromium chromium-common \
             tigervnc-standalone-server tigervnc-common \
             novnc \
-            x11-utils \
-        && apt-get clean \
-        && rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/* ; \
+            x11-utils || true ; \
+        echo ">>> Stripping leftover XFCE/GTK desktop stack (used only by the VNC/browser GUI)." ; \
+        echo "    On older bases (e.g. agent-server 1.33.x) this desktop environment is installed" ; \
+        echo "    top-level, so the chromium/VNC autoremove above does NOT fully drag it out and" ; \
+        echo "    in particular leaves libxml2, whose CVE-2026-6653 currently has no apt fix — the" ; \
+        echo "    only remediation is removing the unused component (matches the repo policy)." ; \
+        echo "    Unconditional purge: apt-get purge is a harmless no-op for any of these that is" ; \
+        echo "    already gone (they are all real Debian packages, so no 'Unable to locate')." ; \
+        apt-get purge -y \
+            xfce4 xfce4-session xfce4-panel xfce4-settings xfce4-appfinder \
+            xfce4-pulseaudio-plugin xfwm4 xfdesktop4 thunar thunar-data exo-utils libexo-2-0 \
+            adwaita-icon-theme gtk-update-icon-cache libgtk-3-0t64 libgtk-3-common libgtk-layer-shell0 \
+            libdbusmenu-gtk3-4 libgarcon-gtk3-1-0 libwnck-3-0 libkeybinder-3.0-0 \
+            libnotify4 libxklavier16 shared-mime-info libgdk-pixbuf-2.0-0 \
+            libthunarx-3-0 libxfce4windowing-0-0 libxfce4panel-2.0-4 \
+            libxfce4ui-2-0 libxfce4ui-utils libxfce4ui-common \
+            libxml2 || true ; \
+        apt-get autoremove --purge -y ; \
+        if dpkg-query -W -f='${Status}\n' libxml2 2>/dev/null | grep -q 'install ok installed'; then \
+            echo "ERROR: libxml2 still installed after desktop strip (CVE-2026-6653 unfixed)" >&2 ; \
+            apt-cache rdepends --installed libxml2 2>/dev/null | sed 1d >&2 ; exit 1 ; \
+        fi ; \
+        echo ">>> Desktop/GTK stack and libxml2 removed (CVE-2026-6653 cleared)." ; \
+        apt-get clean ; \
+        rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/* ; \
     else \
         echo ">>> Keeping browser/VNC stack (set STRIP_BROWSER_TOOLS=1 to remove)." ; \
     fi
