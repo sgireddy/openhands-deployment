@@ -23,11 +23,46 @@ re-scan BY DIGEST (see cache gotcha below):
 | Tag | Manifest list | amd64 | arm64 | CRITICAL/arch |
 |-----|---------------|-------|-------|---------------|
 | `agent-server:custom_base-slim` (+`-1.58.1`) | `fdef4615e097…` | `8e9dc1327b2d…` | `412bb202e347…` | 1 (linux-libc-dev CVE-2026-93221, no fix, accepted) |
-| `agent-server:custom_base-slim-0c` (+`-0c-1.58.1`) | `92ecf4055ab3…` | `68fb754acd2c…` | `f6f51c05e048…` | **0** (toolchain stripped; no runtime native compile) |
+| `agent-server:custom_base-slim-0c` (+`-0c-1.58.1`) | `49d835335ecb…` | `48d702bca355…` | `995ce99bd4aa…` | **0** (snapshot→live apt + toolchain stripped) |
+| `openhands:custom_base-slim-0c` (+`-0c-1.10.0`) | `d71f18d34c37…` | `86555e746c24…` | `edd8353b5481…` | **0** (snapshot→live apt + OpenSSH purged + py pins) |
 | `openhands:custom_base-slim` | `40309da22f83…` | `6833f637c977…` | `b906d37d6bb4…` | **0** |
 
-Both are eMudhra-clean (OS store + certifi top/vendored stripped; agent-server
-uv on UV_NATIVE_TLS). openhands slim has OpenSSH purged (CVE-2026-60002).
+Both `-0c` images verified **Critical=0 on amd64 AND arm64** and eMudhra-clean
+(OS store + certifi top/vendored stripped; agent-server uv on UV_NATIVE_TLS).
+openhands `-0c-1.10.0` has OpenSSH purged (unfixable CVE-2026-60002) and pins
+anyio 4.14.2 / certifi 2026.10.19 / Authlib 1.9.0 / GitPython 3.1.59 / PyJWT
+2.14.0 / pillow 13.0.0 / pip 26.2.2. It is the classic `openhands.server.listen`
+server line; its runtime contract matches the existing oh.sh (SANDBOX_USER_ID,
+FILE_STORE_PATH=/.openhands) and alembic migrates the existing openhands.db +
+v1_conversations in place, so conversation history carries forward.
+
+### ⚠️ Upstream bases pin apt to a FROZEN Debian snapshot (critical gotcha)
+
+Both bases set apt sources to `snapshot.debian.org/archive/debian[-security]/<TS>/`
+(e.g. 20261019) with `Check-Valid-Until: no` for reproducibility. Consequence:
+`apt-get upgrade` can NEVER pull security fixes published after that timestamp,
+so Critical OS CVEs (libbrotli1 CVE-2026-111497→deb13u1, libgnutls→deb13u4,
+perl→deb13u1, openssl/libssl→deb13u3, …) show as "fixed-but-available" yet stay
+installed no matter how many times you rebuild — even `--no-cache`. Symptom:
+Trivy reports e.g. `libbrotli1 1.1.0-2+b7` Critical with Status=fixed while apt
+inside the base says "already newest". Fix: both overlays now repoint the
+snapshot URIs to the LIVE `deb.debian.org` + `security.debian.org` mirrors
+before `apt-get upgrade` (ARG `APT_SNAPSHOT_OVERRIDE=1`, default on; must run as
+`USER root` — the agent-server base's default user is non-root). This trades
+bit-reproducibility for security currency, which is the Critical=0 goal. Rebuild
+0c releases periodically to stay current.
+
+### oh.sh wiring (agent-server image for the sandbox)
+
+The classic server resolves the sandbox image via
+`openhands/app_server/sandbox/sandbox_spec_service.py:get_agent_server_image()`:
+env `AGENT_SERVER_IMAGE_REPOSITORY` + `AGENT_SERVER_IMAGE_TAG`. When REPOSITORY
+is a CUSTOM repo (not the upstream default), the TAG is used VERBATIM — no
+version rewrite — so running agent-server 1.58.1 under an app that bundles 1.33.0
+is accepted. Verified live: app `-0c-1.10.0` spawns
+`sgireddy/agent-server:custom_base-slim-0c-1.58.1` sandbox containers and polls
+their HTTP endpoint (handshake OK). The user's `~/projects/oh_docker/oh.sh` now
+pins the app by digest and sets these two envs.
 NOT yet rebuilt/pushed multi-arch: the *regular* (non-slim) `custom_base`
 tags, and the openhands regular base needs a source-built `openhands:latest`
 (0.x fork) which isn't present — deferred, pending the 1.x base-sourcing call.

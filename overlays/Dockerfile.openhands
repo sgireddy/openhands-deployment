@@ -39,6 +39,28 @@ LABEL org.opencontainers.image.title="openhands-hardened" \
 
 # ---- OS package security upgrades ------------------------------------------
 USER root
+
+# The upstream base pins apt to a FROZEN Debian snapshot (snapshot.debian.org,
+# e.g. .../archive/debian/20261019T.../) for reproducible builds. That freeze
+# means `apt-get upgrade` can NEVER see security fixes published after the
+# snapshot date — so Critical OS CVEs with an available deb13uX fix (libbrotli1,
+# libgnutls30t64, perl, openssl, ...) stay unpatched no matter how often we
+# rebuild. To meet the Critical=0 goal we repoint the snapshot URIs to the LIVE
+# Debian + security mirrors before upgrading. Set APT_SNAPSHOT_OVERRIDE="" to
+# keep the base's frozen snapshot (reproducible but potentially behind).
+ARG APT_SNAPSHOT_OVERRIDE=1
+RUN if [ -n "$APT_SNAPSHOT_OVERRIDE" ]; then \
+        echo ">>> Repointing frozen Debian snapshot -> live mirrors for current security fixes" ; \
+        for f in /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources; do \
+            [ -e "$f" ] || continue ; \
+            sed -i -E \
+              -e 's#https?://snapshot\.debian\.org/archive/debian-security/[0-9TZ]+/?#http://security.debian.org/debian-security/#g' \
+              -e 's#https?://snapshot\.debian\.org/archive/debian/[0-9TZ]+/?#http://deb.debian.org/debian/#g' \
+              "$f" ; \
+        done ; \
+    else \
+        echo ">>> Keeping base's frozen apt snapshot (APT_SNAPSHOT_OVERRIDE empty)." ; \
+    fi
 RUN apt-get update -y \
     && apt-get -y upgrade \
     && apt-get -y autoremove --purge \
