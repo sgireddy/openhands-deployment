@@ -627,13 +627,13 @@ build the slim variant with both strips on:
 docker buildx build \
     --file overlays/Dockerfile.agent-server \
     --platform linux/amd64,linux/arm64 \
-    --build-arg BASE_IMAGE=ghcr.io/openhands/agent-server:1.58.1-python \
-    --build-arg PIP_UPGRADES="pip==26.2.2 certifi==2026.10.19 anyio==4.14.2 litellm==1.93.2" \
+    --build-arg BASE_IMAGE=ghcr.io/openhands/agent-server:1.64.0-python \
+    --build-arg PIP_UPGRADES="pip==26.3 certifi==2026.11.20 anyio==4.16.0 litellm==1.108.16" \
     --build-arg STRIP_BROWSER_TOOLS=1 \
     --build-arg STRIP_DIND=1 \
     --provenance=false \
     --tag <your-registry>/agent-server:custom_base-slim \
-    --tag <your-registry>/agent-server:custom_base-slim-1.58.1 \
+    --tag <your-registry>/agent-server:custom_base-slim-1.64.0 \
     --push .
 ```
 
@@ -744,7 +744,7 @@ docker buildx build \
     --file overlays/Dockerfile.openhands \
     --platform linux/amd64,linux/arm64 \
     --build-arg BASE_IMAGE=docker.io/sgireddy/openhands:custom_base \
-    --build-arg PIP_UPGRADES="pip==26.2.2 certifi==2026.10.19 anyio==4.14.2 litellm==1.93.2 pillow==13.0.0 GitPython==3.1.59 PyJWT==2.14.0 jupyter_server==2.20.0 lxml==6.1.0" \
+    --build-arg PIP_UPGRADES="pip==26.3 certifi==2026.11.20 anyio==4.16.0 litellm==1.108.16 pillow==13.0.0 GitPython==3.2.1 PyJWT==2.15.1 jupyter_server==2.21.1 lxml==6.1.3" \
     --build-arg STRIP_VSCODE_BUILD_ARTIFACTS=1 \
     --build-arg STRIP_OPENSSH=1 \
     --provenance=false \
@@ -752,9 +752,10 @@ docker buildx build \
     --push .
 ```
 
-The `PIP_UPGRADES` list clears the fixable Critical Python CVEs found in
-the 2026-10-22 Trivy review (`certifi` emSign distrust, `anyio` TLS
-spoofing, `litellm`, `pillow`, `GitPython`, `PyJWT`, `jupyter_server`).
+The `PIP_UPGRADES` list clears the fixable Critical/High Python CVEs
+(`certifi` emSign distrust, `anyio` TLS spoofing, `litellm`, `pillow`,
+`GitPython`, `PyJWT`, `jupyter_server`), refreshed to the latest safe
+versions in the 2026-11-24 review.
 `pillow` 12→13 is a major bump — review if you depend on its API. The
 emSign system-root blacklist also runs by default here
 (`--build-arg KEEP_EMSIGN_ROOT=1` to opt out).
@@ -767,12 +768,12 @@ what takes the openhands slim image to **0 Critical**. Omit the flag if
 you clone via `git+ssh` from inside the container. `agent-server` does
 not ship OpenSSH, so it needs no equivalent flag.
 
-> **litellm pin — important.** `litellm==1.93.2` is deliberate, not just
+> **litellm pin — important.** `litellm==1.108.16` is deliberate, not just
 > "latest". `1.107.0` is a **malicious** release (OSV `MAL-2026-2144`,
-> now yanked from PyPI) — never use it. `1.93.2` fixes `CVE-2026-84377`
-> (authenticated SSRF + provider-credential exfiltration), which the SDK
-> lock target `1.93.0` is still vulnerable to, and stays inside the
-> `openhands-sdk` window `>=1.93.0,<1.106` (1.106+ breaks on MCP 1.x).
+> now yanked from PyPI) — never use it. `1.108.16` is the newest release
+> inside the `openhands-sdk` v1.64.0 window `>=1.108.3,<1.109` (1.106+
+> needs MCP 2.x; 1.109 changes cost accounting), has no known OSV
+> advisories, and is well past the `CVE-2026-84377` fix (1.93.2).
 > See the litellm block in `.env.example` for the full rationale.
 
 (Replace `BASE_IMAGE` with whichever upstream openhands image you build

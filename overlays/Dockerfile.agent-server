@@ -19,9 +19,9 @@
 #       -t agent-server:custom_base .
 
 # Pin by DIGEST (not a floating tag) for reproducible, tamper-evident builds.
-# This digest is ghcr.io/openhands/agent-server:1.58.1-python (multi-arch).
+# This digest is ghcr.io/openhands/agent-server:1.64.0-python (multi-arch).
 # Override BASE_IMAGE to bump; re-pin the digest when you do.
-ARG BASE_IMAGE=ghcr.io/openhands/agent-server:1.58.1-python@sha256:3ec59797bc2e237c7a3bda3468f4e26bc860416949d439fe3f485798afd814bc
+ARG BASE_IMAGE=ghcr.io/openhands/agent-server:1.64.0-python@sha256:184a3ba601d38f4267b74c42743dcbcf77d85b4b40b3a6f9e7bff736b9927886
 FROM ${BASE_IMAGE}
 
 ARG BASE_IMAGE

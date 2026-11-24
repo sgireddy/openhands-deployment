@@ -14,6 +14,37 @@ top of an upstream maintainer-published base, then is scanned by Scout
 or Trivy. Output images are tagged `:custom_base` and pushed to
 `docker.io/sgireddy/{openhands,agent-server}`.
 
+## Upstream version bump (2026-11-24, branch `upgrade/openhands-latest-safe-images`)
+
+Bumped the source pins to the newest upstream + the latest SAFE package
+versions (verified clean against OSV + PyPI-yanked on 2026-11-24). NOT yet
+built/scanned/published — the Mac build host must run build + registry Trivy
+re-scan BY DIGEST before these become a "published" set.
+
+- **agent-server base**: `1.58.1-python` → **`1.64.0-python`** (SDK v1.64.0,
+  newest GitHub release). Digest re-pinned in `overlays/Dockerfile.agent-server`
+  to `sha256:184a3ba601d38f4267b74c42743dcbcf77d85b4b40b3a6f9e7bff736b9927886`
+  (manifest list, multi-arch). `.env.example AGENT_SERVER_BASE_TAG` updated.
+- **openhands app base**: operator-built; newest release is **v1.45.0**
+  (`.env.example` comment updated). Still `OPENHANDS_BASE_TAG=latest`.
+- **litellm window CHANGED**: SDK v1.64.0 pins `litellm>=1.108.3,<1.109`
+  (was `>=1.93.0,<1.106` on v1.58.x). The old `1.93.2` pin is now OUT of the
+  window and would break install. New pin **`litellm==1.108.16`** (newest
+  1.108.x, OSV-clean, not the malicious 1.107.0). The `<1.109` cap matters:
+  1.109 changes zero-usage cost accounting (SDK #7014); 1.106+ needs mcp>=2.
+- **Python pins refreshed to latest safe** (OSV-clean at these versions; the
+  OLD pins now carry freshly-disclosed advisories — see below):
+  - `GitPython` 3.1.59 → **3.2.1** (3.1.59 now has GHSA/ PYSEC-2026-3982/3984 family)
+  - `PyJWT` 2.14.0 → **2.15.1** (2.14.0 now GHSA-42vr-xj54-vc7v / x33g)
+  - `jupyter_server` 2.20.0 → **2.21.1** (2.20.0 now GHSA-c3mw-737p-c7g2)
+  - `certifi` 2026.10.19 → **2026.11.20**; `anyio` 4.14.2 → **4.16.0**;
+    `lxml` 6.1.0 → **6.1.3**; `pip` 26.2.2 → **26.3**; `pillow` stays **13.0.0**.
+  - pip **26.3** vendors certifi **2026.10.23** (≥ the overlay's 2026.10.19
+    emSign floor), so the certifi-floor build guard still passes untouched.
+- **uv / npm supply-chain pins UNCHANGED** — `UV_UPGRADE_VERSION=0.13.5`
+  (0.13.6 uvx is dirty), `UV_NATIVE_TLS=1`, npm 12.2.1 / gemini-cli 0.39.1 /
+  proxy-addr 2.0.8 / shell-quote 1.12.0 all still OSV-clean on 2026-11-24.
+
 ## Latest published hardened slim set (2026-10-23, multi-arch amd64+arm64)
 
 Built via the Apple-Silicon Mac's `ohpush` docker-container buildx builder
