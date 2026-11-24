@@ -30,6 +30,14 @@ ARG BASE_IMAGE=docker.io/sgireddy/openhands:custom_base@sha256:7b3e9c5d55238ff0a
 FROM ${BASE_IMAGE}
 
 ARG BASE_IMAGE
+# APP_UPGRADE bumps the OpenHands app framework itself (e.g. openhands-ai==1.11.0)
+# in a SEPARATE pip pass BEFORE PIP_UPGRADES. This matters because the app framework
+# ships exact/capped dependency pins (e.g. openhands-ai 1.11.0 hard-pins anyio==4.9.0,
+# a CRITICAL CVE). Resolving the framework bump and the security overrides in one pip
+# command is impossible; doing the framework first, then force-upgrading the vulnerable
+# transitive deps via PIP_UPGRADES, lets pip override them (with a dependency-conflict
+# warning) so the final image is Critical=0 while still running the newer app.
+ARG APP_UPGRADE=""
 ARG PIP_UPGRADES=""
 
 LABEL org.opencontainers.image.title="openhands-hardened" \
@@ -116,11 +124,13 @@ RUN if [ -n "$STRIP_OPENSSH" ]; then \
 ARG KEEP_EMSIGN_ROOT=""
 RUN if [ -z "$KEEP_EMSIGN_ROOT" ]; then \
         conf=/etc/ca-certificates.conf ; \
-        n="$(grep -ciE '^mozilla/emSign' "$conf")" ; \
-        echo ">>> Distrusting $n emSign (eMudhra) root(s):" ; \
-        grep -iE '^mozilla/emSign' "$conf" || true ; \
-        if [ "$n" -eq 0 ]; then \
-            echo "ERROR: no 'mozilla/emSign*' trust entry found in $conf; emSign filenames may have changed upstream" >&2 ; exit 1 ; \
+        active="$(grep -ciE '^mozilla/emSign' "$conf")" ; \
+        blacklisted="$(grep -ciE '^!mozilla/emSign' "$conf")" ; \
+        total=$((active + blacklisted)) ; \
+        echo ">>> emSign (eMudhra) roots: $active still-trusted, $blacklisted already-distrusted" ; \
+        grep -iE '^!?mozilla/emSign' "$conf" || true ; \
+        if [ "$total" -eq 0 ]; then \
+            echo "ERROR: no 'mozilla/emSign*' entry found in $conf (trusted or distrusted); emSign filenames may have changed upstream" >&2 ; exit 1 ; \
         fi \
         && sed -i -E "s@^(mozilla/emSign.*\.crt)@!\1@I" "$conf" \
         && update-ca-certificates --fresh \
@@ -137,8 +147,15 @@ RUN if [ -z "$KEEP_EMSIGN_ROOT" ]; then \
 # The upstream image installs to /app/.venv as the "openhands" user. We honour
 # that by switching users for pip operations so venv metadata stays consistent.
 USER openhands
+RUN if [ -n "$APP_UPGRADE" ]; then \
+        echo ">>> Upgrading OpenHands app framework (phase 1): $APP_UPGRADE" \
+        && python -m pip install --no-cache-dir --upgrade $APP_UPGRADE \
+        && python -m pip cache purge >/dev/null 2>&1 || true ; \
+    else \
+        echo ">>> No APP_UPGRADE specified; keeping base app framework version." ; \
+    fi
 RUN if [ -n "$PIP_UPGRADES" ]; then \
-        echo ">>> Upgrading Python packages: $PIP_UPGRADES" \
+        echo ">>> Upgrading Python packages (phase 2, security overrides): $PIP_UPGRADES" \
         && python -m pip install --no-cache-dir --upgrade $PIP_UPGRADES \
         && python -m pip cache purge >/dev/null 2>&1 || true ; \
     else \

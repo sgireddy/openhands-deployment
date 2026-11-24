@@ -53,6 +53,69 @@ re-scan BY DIGEST before these become a "published" set.
   is ITSELF still vulnerable — GHSA-8m4g-j4wp-wgcg / PYSEC-2026-4356; the fix
   floor is **1.9.1**). Pinned to 1.9.10 (latest, OSV-clean).
 
+### Deployed "Option A" refresh — PUBLISHED 2026-11-24 (multi-arch)
+
+Goal: ship the current launcher deployment on the safest images WITHOUT a risky
+app version jump. The running launchers (`~/projects/oh_docker/oh.sh` +
+`oh-claude.sh`) pin app **`slim-0c-1.10.0`** (openhands-ai 1.10.0 / SDK +
+agent-server **1.33.0**) and sandbox **`custom_base-browser-1.33.0`**. We
+re-hardened BOTH in place (refresh drifted deps) and republished under NEW DATED
+tags (keeps old digests for rollback):
+
+| Image | New tag | Manifest digest | Trivy CRIT |
+|-------|---------|-----------------|------------|
+| app | `sgireddy/openhands:custom_base-slim-0c-1.10.0-2026-11-24` | `sha256:d2095e18e4ce…` | **0** (amd64+arm64) |
+| sandbox | `sgireddy/agent-server:custom_base-browser-1.33.0-2026-11-24` | `sha256:ed95530e31e0…` | **1** = libxml2 CVE-2026-6653 (no-fix Chromium dep, accepted browser floor) |
+
+Built on the ohpush buildx builder, `--provenance=false`, registry re-scan BY
+DIGEST (both arches). Leaf-dep bumps applied to the app (all were HIGH, NOT
+Critical — the base was already Crit=0): Authlib 1.9.0→**1.9.10**, litellm
+1.84.1→**1.108.16**, GitPython 3.1.59→**3.2.1**, PyJWT 2.14.0→**2.15.1**, urllib3
+2.7.0→**2.8.0**, anyio→4.16.0, certifi→2026.11.20, lxml→6.1.3. `oh.sh` updated to
+the new digests/tag; **`oh-claude.sh` intentionally left untouched** (it runs the
+live agent session — editing it kills the conversation).
+
+Live-tested on a scratch instance (port 3099, fresh data dir, same OH_SECRET_KEY):
+app boots + alembic-migrates, a created conversation spawns the NEW sandbox image,
+reaches status WORKING with **no ConversationInfo schema-skew error** (1.33.0
+app↔1.33.0 sandbox match holds), `send-message` returns `success:true /
+sandbox_status:RUNNING`, Chromium 156.0.8078.108 present, condenser imports OK.
+Gotcha: the sandbox posts event webhooks to `host.docker.internal:<INTERNAL
+port 3000>`, so a scratch app published on a non-3000 host port collides with the
+prod :3000 container and shows harmless webhook 422s — a test-harness artifact,
+not an image defect. To fully exercise agent replies, test on host port 3000.
+
+### Two hard lessons from this upgrade
+
+1. **The app canNOT be version-upgraded by the pip overlay.** `openhands-ai` is
+   NOT pip-managed in the image — the app SOURCE is baked at `/app/openhands`
+   (mypyc-compiled) and SHADOWS any `pip install --upgrade openhands-ai`. Bumping
+   the pip package pulls a newer SDK while the baked app code stays old → import
+   mismatch (e.g. 1.10.0 app code vs SDK 1.34.0 →
+   `ImportError: LLMAgentSettings/AgentSettings`). A real app bump requires
+   rebuilding the base from the app source (`make build` → `openhands:latest`,
+   the documented `OPENHANDS_BASE_IMAGE` flow), then overlay-hardening — the
+   deferred "app base sourcing" step. The `APP_UPGRADE` build-arg (added this
+   session) only works for LEAF/plugin bumps, never the app framework itself.
+2. **`agent-client-protocol` 1.0.0 (released 2026-11-24) breaks SDK ≤1.34.0.**
+   It restructured the package and REMOVED `acp.helpers` (which SDK 1.19–1.34
+   import as `from acp.helpers import image_block, text_block`). SDK's constraint
+   `agent-client-protocol>=0.10.1` is too loose and resolves to 1.0.0. Correct
+   pin for these SDKs = latest 0.x = **`agent-client-protocol==0.12.1`** (0.x API
+   with `helpers`/`schema`/`transports`/`client.connection`). Only relevant when
+   doing a from-scratch app/SDK install; the in-place 1.10.0 refresh kept the
+   base's acp 0.10.1 and was unaffected.
+
+### Overlay fix: emSign guard made idempotent
+
+`Dockerfile.openhands`'s emSign-distrust step failed when re-run on an ALREADY
+hardened `-0c` base: it grepped only active `^mozilla/emSign` lines (0 on a
+hardened base, where they are already `!mozilla/emSign`) and aborted "filenames
+may have changed upstream". Fixed to count BOTH active and `!`-blacklisted
+entries; fails closed only when NEITHER form exists. Required for the re-harden
+pattern (overlay-on-overlay). Honors the repo's "overlays must be idempotent"
+rule.
+
 ### Trivy scan evidence (arm64, 2026-11-24, DB-current)
 
 Scanned from the registry (this sandbox is unprivileged — the docker daemon
