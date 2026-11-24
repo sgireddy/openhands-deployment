@@ -44,6 +44,35 @@ re-scan BY DIGEST before these become a "published" set.
 - **uv / npm supply-chain pins UNCHANGED** — `UV_UPGRADE_VERSION=0.13.5`
   (0.13.6 uvx is dirty), `UV_NATIVE_TLS=1`, npm 12.2.1 / gemini-cli 0.39.1 /
   proxy-addr 2.0.8 / shell-quote 1.12.0 all still OSV-clean on 2026-11-24.
+- **NEW pin — `Authlib==1.9.10`** (openhands only; agent-server ships no
+  Authlib). A Trivy scan of the published `openhands:custom_base-slim` on
+  2026-11-24 surfaced **Authlib 1.6.9 as CRITICAL** — `CVE-2026-96760`
+  (signature-verification bypass via `deserialize_json`) + HIGH
+  CVE-2026-114615/114616/116672 (auth bypass). Authlib was NOT in the
+  `.env.example` PIP_UPGRADES list (the `-0c` notes mention 1.9.0, but 1.9.0
+  is ITSELF still vulnerable — GHSA-8m4g-j4wp-wgcg / PYSEC-2026-4356; the fix
+  floor is **1.9.1**). Pinned to 1.9.10 (latest, OSV-clean).
+
+### Trivy scan evidence (arm64, 2026-11-24, DB-current)
+
+Scanned from the registry (this sandbox is unprivileged — the docker daemon
+runs but container EXEC/`unshare` is denied, so overlay `docker build` RUN
+steps can NOT run here; only registry image scans work). Final hardened
+overlay images must still be BUILT + scanned on the Mac host.
+
+- `ghcr.io/openhands/agent-server:1.64.0-python` (NEW base, UNHARDENED):
+  **5 CRITICAL** (4 fixable = chromium deb13u1→u3 pair, cleared by the
+  overlay apt upgrade; 1 no-fix = libxml2 CVE-2026-6653, the known-accepted
+  Chromium dep), 832 HIGH (486 fixable, overwhelmingly chromium — apt upgrade
+  clears, or STRIP_BROWSER_TOOLS removes the whole browser surface).
+- `sgireddy/agent-server:custom_base-slim` (PUBLISHED, OLD 1.58.1 base):
+  3 CRITICAL (libbrotli1, linux-libc-dev ×2) — all cleared by a rebuild on
+  the newer base + snapshot→live apt; its litellm is still the old 1.93.2.
+- `sgireddy/openhands:custom_base-slim` (PUBLISHED): **1 CRITICAL = Authlib
+  1.6.9** (the gap now fixed above). The many HIGH python pkgs (cryptography,
+  urllib3, mcp, pypdf, tornado, mistune, dulwich, …) are app-bundled deps;
+  per `POLICY_MAX_CRITICAL=0` (HIGH unbounded) they are accepted/tracked, not
+  gating. Rebuilding on the latest app base (v1.45.0) will refresh many.
 
 ## Latest published hardened slim set (2026-10-23, multi-arch amd64+arm64)
 

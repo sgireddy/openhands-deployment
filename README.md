@@ -744,7 +744,7 @@ docker buildx build \
     --file overlays/Dockerfile.openhands \
     --platform linux/amd64,linux/arm64 \
     --build-arg BASE_IMAGE=docker.io/sgireddy/openhands:custom_base \
-    --build-arg PIP_UPGRADES="pip==26.3 certifi==2026.11.20 anyio==4.16.0 litellm==1.108.16 pillow==13.0.0 GitPython==3.2.1 PyJWT==2.15.1 jupyter_server==2.21.1 lxml==6.1.3" \
+    --build-arg PIP_UPGRADES="pip==26.3 certifi==2026.11.20 anyio==4.16.0 litellm==1.108.16 pillow==13.0.0 GitPython==3.2.1 PyJWT==2.15.1 jupyter_server==2.21.1 lxml==6.1.3 Authlib==1.9.10" \
     --build-arg STRIP_VSCODE_BUILD_ARTIFACTS=1 \
     --build-arg STRIP_OPENSSH=1 \
     --provenance=false \
@@ -754,8 +754,9 @@ docker buildx build \
 
 The `PIP_UPGRADES` list clears the fixable Critical/High Python CVEs
 (`certifi` emSign distrust, `anyio` TLS spoofing, `litellm`, `pillow`,
-`GitPython`, `PyJWT`, `jupyter_server`), refreshed to the latest safe
-versions in the 2026-11-24 review.
+`GitPython`, `PyJWT`, `jupyter_server`, and `Authlib` — the latter carries
+the CRITICAL `CVE-2026-96760` signature-verification bypass, fixed in
+1.9.1+), refreshed to the latest safe versions in the 2026-11-24 review.
 `pillow` 12→13 is a major bump — review if you depend on its API. The
 emSign system-root blacklist also runs by default here
 (`--build-arg KEEP_EMSIGN_ROOT=1` to opt out).
