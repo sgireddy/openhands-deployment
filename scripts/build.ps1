@@ -7,7 +7,7 @@
     images already exist in the local Docker cache; this script does NOT
     pull anything. Procuring upstream is the operator's job.
 
-    For each component (openhands, agent-server):
+    For each component (openhands, agent-server, agent-canvas):
       1. Verify upstream is in local cache; bail if not.
       2. Scout-scan upstream (BASELINE).
       3. Build local hardening overlay (Dockerfile.<component>).
@@ -15,7 +15,7 @@
       5. Apply policy (POLICY_MAX_CRITICAL / POLICY_MAX_HIGH from .env).
 
 .PARAMETER Component
-    "openhands" or "agent-server". Omit to run both.
+    "openhands", "agent-server", or "agent-canvas". Omit to run all.
 
 .PARAMETER Yes
     Skip interactive prompts.
@@ -23,6 +23,7 @@
 .EXAMPLE
     .\scripts\build.ps1
     .\scripts\build.ps1 -Component agent-server
+    .\scripts\build.ps1 -Component agent-canvas
     .\scripts\build.ps1 -Yes
 
 .NOTES
@@ -34,7 +35,7 @@
 
 [CmdletBinding()]
 param(
-    [ValidateSet('openhands','agent-server')]
+    [ValidateSet('openhands','agent-server','agent-canvas')]
     [string[]]$Component,
     [switch]$Yes
 )
@@ -48,7 +49,7 @@ $RepoRoot = Resolve-Path (Join-Path $PSScriptRoot '..')
 $script:AssumeYes = [bool]$Yes
 if ($Yes) { $env:ASSUME_YES = '1' }
 
-if (-not $Component) { $Component = @('openhands','agent-server') }
+if (-not $Component) { $Component = @('openhands','agent-server','agent-canvas') }
 
 Load-Env -RepoRoot $RepoRoot
 Test-Tools
@@ -82,7 +83,7 @@ function Invoke-ComponentBuild {
     [OutputType([int])]
     param(
         [Parameter(Mandatory)]
-        [ValidateSet('openhands','agent-server')]
+        [ValidateSet('openhands','agent-server','agent-canvas')]
         [string]$Comp
     )
 
@@ -102,6 +103,14 @@ function Invoke-ComponentBuild {
             $outTag       = $env:AGENT_SERVER_OUT_TAG
             $dockerfile   = Join-Path $RepoRoot 'overlays/Dockerfile.agent-server'
             $pipUpgrades  = $env:PIP_UPGRADES_AGENT_SERVER
+        }
+        'agent-canvas' {
+            $baseImage    = $env:AGENT_CANVAS_BASE_IMAGE
+            $baseTag      = $env:AGENT_CANVAS_BASE_TAG
+            $outImage     = $env:AGENT_CANVAS_OUT_IMAGE
+            $outTag       = $env:AGENT_CANVAS_OUT_TAG
+            $dockerfile   = Join-Path $RepoRoot 'overlays/Dockerfile.agent-canvas'
+            $pipUpgrades  = $env:PIP_UPGRADES_AGENT_CANVAS
         }
     }
     $upstream = "${baseImage}:${baseTag}"

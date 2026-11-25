@@ -1,0 +1,69 @@
+# Hardened deployment of the OpenHands **Agent Canvas** all-in-one app.
+#
+# This is SEPARATE from compose/docker-compose.yml (the classic openhands
+# orchestrator). Canvas is a single self-contained image: frontend +
+# automation + a bundled agent-server behind one ingress proxy on :8000. It
+# does NOT spawn sandbox containers, so it needs no docker.sock and no
+# AGENT_SERVER_IMAGE_* wiring.
+#
+# Security posture: the ingress is bound to 127.0.0.1 only (localhost-only
+# network exposure) and protected by LOCAL_BACKEND_API_KEY. Change
+# CANVAS_BIND_ADDR only if you intentionally want LAN exposure.
+#
+# Usage:
+#   cd ..                         # repo root, where .env lives
+#   # ensure the hardened image is present (built via scripts/build.sh agent-canvas
+#   # or pulled: docker pull sgireddy/agent-canvas:custom_base-browser-1.45.0)
+#   docker compose -f compose/docker-canvas.yml --env-file .env up -d
+#   # → http://127.0.0.1:${CANVAS_HOST_PORT:-3000}/canvas
+#
+# This file bakes NO secrets. LOCAL_BACKEND_API_KEY and any LLM credentials
+# come from .env. The LLM itself is configured per-user through the Canvas
+# Settings API (PATCH) on first run, persisted in the state volume below —
+# it is not an environment variable.
+
+services:
+  agent-canvas:
+    image: ${CANVAS_IMAGE:-sgireddy/agent-canvas:custom_base-browser-1.45.0}
+    container_name: agent-canvas
+    # Prefer the locally-built/pulled hardened image; never silently refetch a
+    # floating tag. Set CANVAS_PULL_POLICY=always to force a pull.
+    pull_policy: ${CANVAS_PULL_POLICY:-missing}
+    # Localhost-only by default. The classic stack keeps :3002 (and, until you
+    # cut over, :3000); pick a CANVAS_HOST_PORT that does not collide.
+    ports:
+      - "${CANVAS_BIND_ADDR:-127.0.0.1}:${CANVAS_HOST_PORT:-3000}:8000"
+    environment:
+      # Protects the bundled backend API for any non-localhost (LAN) session.
+      # REQUIRED in practice — set a strong random value in .env
+      # (`openssl rand -hex 32`). Left plain (not `:?`) so routine `docker
+      # compose down` still works without the value in the environment; the
+      # localhost-only port binding is the primary network control.
+      LOCAL_BACKEND_API_KEY: ${LOCAL_BACKEND_API_KEY:-}
+      # Feature toggles (match the stock image defaults the agent expects).
+      OH_ENABLE_BROWSER: ${OH_ENABLE_BROWSER:-true}
+      OH_ENABLE_VSCODE: ${OH_ENABLE_VSCODE:-true}
+      # Chromium needs these flags inside a container (no namespaces / small
+      # /dev/shm). Only consulted when OH_ENABLE_BROWSER=true.
+      CHROMIUM_FLAGS: ${CHROMIUM_FLAGS:---no-sandbox --disable-dev-shm-usage --disable-gpu}
+    extra_hosts:
+      # So Canvas can reach a host-side litellm proxy at
+      # http://host.docker.internal:4000 (configure the model in Settings).
+      - "host.docker.internal:host-gateway"
+    volumes:
+      # Settings, secrets, conversations, and the automation DB. Named volume
+      # so history survives container recreation. Back this up before upgrades.
+      - agent-canvas-state:/home/openhands/.openhands
+      # User code the agent can read/edit. Defaults to a host path OUTSIDE the
+      # repo (same convention as the classic workspace) so agent-generated
+      # files can never be accidentally staged. Override via CANVAS_PROJECTS.
+      - ${CANVAS_PROJECTS:-${HOME}/openhands-deployment/canvas-projects}:/projects
+    # Chromium occasionally needs more than the default 64MB /dev/shm.
+    shm_size: ${CANVAS_SHM_SIZE:-2g}
+    stdin_open: true
+    tty: true
+    restart: unless-stopped
+
+volumes:
+  agent-canvas-state:
+    name: ${CANVAS_STATE_VOLUME:-agent-canvas-state}

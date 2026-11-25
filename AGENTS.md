@@ -4,15 +4,217 @@ Persistent notes for any agent working on this repo. Keep terse and current.
 
 ## Repo purpose
 
-Hardening overlay for two OpenHands images:
+Hardening overlay for three OpenHands images:
 
-- **`openhands`**     — frontend / orchestration container (Node + Python).
+- **`openhands`**     — frontend / orchestration container (Node + Python), the
+  classic 0.x/1.x app (listen server at :3000/:3002).
 - **`agent-server`**  — sandbox / runtime container (Python + browser tools).
+- **`agent-canvas`**  — the NEW all-in-one self-host app (frontend + automation
+  + a bundled agent-server behind one ingress proxy :8000). The image is literally
+  `FROM ghcr.io/openhands/agent-server`, so its overlay mirrors agent-server's.
 
 Each gets a thin overlay Dockerfile that applies apt + Python upgrades on
 top of an upstream maintainer-published base, then is scanned by Scout
-or Trivy. Output images are tagged `:custom_base` and pushed to
-`docker.io/sgireddy/{openhands,agent-server}`.
+or Trivy. Output images are tagged `:custom_base*` and pushed to
+`docker.io/sgireddy/{openhands,agent-server,agent-canvas}`.
+
+## agent-canvas hardening (2026-11-25, branch `upgrade/openhands-latest-safe-images`)
+
+Migration to the Agent Canvas stack ("Option B"). Canvas is an all-in-one image
+`ghcr.io/openhands/agent-canvas:1.45.0` (digest
+`sha256:4eb6d6fec924573783d424ee7b911b01eb1bd620cd8bb6e69fbc6b215599083a`,
+multi-arch) that bundles **agent-server/SDK 1.63.1** + **automation 1.35.0** +
+the React frontend. Its Dockerfile final stage is `FROM ${AGENT_SERVER_IMAGE}`,
+runs as USER **openhands**, uses **system Python** (`/usr/local/lib/python3.13`,
+NO `/usr/local/venv`), a single uv at `/usr/bin/uv` (0.13.7), and EXPOSE 8000
+with `ENTRYPOINT tini -- /opt/agent-canvas/entrypoint.sh`.
+
+### Stock Trivy picture = very clean (only the browser stack)
+
+`trivy image --severity CRITICAL --pkg-types os,library` on stock 1.45.0 = **5
+CRITICAL**, ALL browser-related:
+- `chromium` / `chromium-common` CVE-2026-118333 + CVE-2026-118337 (4 rows),
+  **FIXED** in `156.0.8078.108-1~deb13u1` — cleared by the overlay's apt-upgrade
+  once the frozen Debian snapshot (`20261114T000000Z`) is repointed to live
+  `security.debian.org`.
+- `libxml2` CVE-2026-6653 — **NO FIX** (a Chromium dep, DoS-only). The accepted
+  **floor** for any browser-capable image (same as agent-server's
+  `custom_base-browser`).
+
+The Python stack is ALREADY fully patched in 1.45.0 (litellm **1.108.16**,
+certifi **2026.11.20**, anyio **4.16.0**, Authlib **1.9.10**, PyJWT 2.15.1,
+pillow 13.0.0, lxml 6.1.3, pip 26.2.2) → 0 Python Criticals, so
+`PIP_UPGRADES_AGENT_CANVAS` defaults EMPTY.
+
+### Overlay `overlays/Dockerfile.agent-canvas`
+
+Mirrors the agent-server overlay (apt live-mirror upgrade, full emSign/eMudhra
+distrust of OS store + certifi family-strip, uv native-TLS + binary floor,
+bundled npm/node CVE fixes, optional STRIP_* toggles). Canvas adaptations:
+USER root to patch → **USER openhands** restored at end; inherited tini
+ENTRYPOINT preserved; no venv branch exercised.
+
+Default build is **browser-capable** (`custom_base-browser`): apt-upgrade clears
+the 4 chromium CVEs, leaving the 1 unfixable libxml2 (accepted). Set
+`--build-arg STRIP_BROWSER_TOOLS=1` for a literal **Critical=0** image (purges
+chromium + XFCE/GTK + libxml2; the in-sandbox browser tool then hard-fails).
+
+### Verified build (arm64, --load, local Trivy 2026-11-25)
+
+`agent-canvas:custom_base-browser-1.45.0` → Trivy CRITICAL **5 → 1** (only
+libxml2 CVE-2026-6653, unfixable/accepted). In-image: chromium
+156.0.8078.108-1~deb13u1, **0 emSign** in OS store AND certifi cacert, uv on
+UV_NATIVE_TLS, npm 12.2.1, shell-quote 1.12.0.
+
+**PUBLISHED multi-arch 2026-11-25** (amd64+arm64, `--provenance=false`) to
+`docker.io/sgireddy/agent-canvas`, tags `custom_base-browser-1.45.0` and dated
+`custom_base-browser-1.45.0-2026-11-25`:
+- manifest list `sha256:9c85c1dded71a27947adb78816506e2386f742f45f8a5ba8a138fd47ad86d52e`
+- amd64 `sha256:f476a8d2e38abaebf708d657ee258dc67f236a63ac0c4897aad9c5afe164eb7c`
+- arm64 `sha256:e13bd9a9f252ca75e5669e9e0b6a68b7c6d29d63efb52156cd486b52b8518b88`
+
+Registry Trivy re-scan BY DIGEST confirmed **1 CRITICAL on BOTH arches** (the
+accepted libxml2 only).
+
+Wired as a first-class build component: `AGENT_CANVAS_{BASE,OUT}_{IMAGE,TAG}` +
+`PIP_UPGRADES_AGENT_CANVAS` in `.env.example`/`lib.sh`/`lib.ps1`;
+`build.sh`/`build.ps1` accept `agent-canvas` and include it in the default set.
+
+### Canvas runtime facts (for the self-host cutover)
+
+- Self-host needs ONLY the canvas image — runtime-api/MARS is Cloud-only.
+- Single ingress **:8000**; the plan is to expose it on host **:3000** while the
+  classic `:3002` (openhands-claude) stays up for a day. Bind localhost-only.
+- LLM via the existing litellm proxy (`http://host.docker.internal:4000`,
+  model `litellm_proxy/azure-gpt-5.6-terra`); Canvas's bundled litellm is OK too.
+- Persistence volumes: `/home/openhands/.openhands` (settings/secrets/convos/
+  automation DB) + `/projects` (user code). Conversation history does NOT carry
+  over from the classic stack — acceptable per the migration plan.
+- Settings API uses **PATCH** with `agent_settings_diff`; conversation create
+  needs `agent_settings` with `secrets_encrypted:true`.
+
+## Upstream version bump (2026-11-24, branch `upgrade/openhands-latest-safe-images`)
+
+Bumped the source pins to the newest upstream + the latest SAFE package
+versions (verified clean against OSV + PyPI-yanked on 2026-11-24). NOT yet
+built/scanned/published — the Mac build host must run build + registry Trivy
+re-scan BY DIGEST before these become a "published" set.
+
+- **agent-server base**: `1.58.1-python` → **`1.64.0-python`** (SDK v1.64.0,
+  newest GitHub release). Digest re-pinned in `overlays/Dockerfile.agent-server`
+  to `sha256:184a3ba601d38f4267b74c42743dcbcf77d85b4b40b3a6f9e7bff736b9927886`
+  (manifest list, multi-arch). `.env.example AGENT_SERVER_BASE_TAG` updated.
+- **openhands app base**: operator-built; newest release is **v1.45.0**
+  (`.env.example` comment updated). Still `OPENHANDS_BASE_TAG=latest`.
+- **litellm window CHANGED**: SDK v1.64.0 pins `litellm>=1.108.3,<1.109`
+  (was `>=1.93.0,<1.106` on v1.58.x). The old `1.93.2` pin is now OUT of the
+  window and would break install. New pin **`litellm==1.108.16`** (newest
+  1.108.x, OSV-clean, not the malicious 1.107.0). The `<1.109` cap matters:
+  1.109 changes zero-usage cost accounting (SDK #7014); 1.106+ needs mcp>=2.
+- **Python pins refreshed to latest safe** (OSV-clean at these versions; the
+  OLD pins now carry freshly-disclosed advisories — see below):
+  - `GitPython` 3.1.59 → **3.2.1** (3.1.59 now has GHSA/ PYSEC-2026-3982/3984 family)
+  - `PyJWT` 2.14.0 → **2.15.1** (2.14.0 now GHSA-42vr-xj54-vc7v / x33g)
+  - `jupyter_server` 2.20.0 → **2.21.1** (2.20.0 now GHSA-c3mw-737p-c7g2)
+  - `certifi` 2026.10.19 → **2026.11.20**; `anyio` 4.14.2 → **4.16.0**;
+    `lxml` 6.1.0 → **6.1.3**; `pip` 26.2.2 → **26.3**; `pillow` stays **13.0.0**.
+  - pip **26.3** vendors certifi **2026.10.23** (≥ the overlay's 2026.10.19
+    emSign floor), so the certifi-floor build guard still passes untouched.
+- **uv / npm supply-chain pins UNCHANGED** — `UV_UPGRADE_VERSION=0.13.5`
+  (0.13.6 uvx is dirty), `UV_NATIVE_TLS=1`, npm 12.2.1 / gemini-cli 0.39.1 /
+  proxy-addr 2.0.8 / shell-quote 1.12.0 all still OSV-clean on 2026-11-24.
+- **NEW pin — `Authlib==1.9.10`** (openhands only; agent-server ships no
+  Authlib). A Trivy scan of the published `openhands:custom_base-slim` on
+  2026-11-24 surfaced **Authlib 1.6.9 as CRITICAL** — `CVE-2026-96760`
+  (signature-verification bypass via `deserialize_json`) + HIGH
+  CVE-2026-114615/114616/116672 (auth bypass). Authlib was NOT in the
+  `.env.example` PIP_UPGRADES list (the `-0c` notes mention 1.9.0, but 1.9.0
+  is ITSELF still vulnerable — GHSA-8m4g-j4wp-wgcg / PYSEC-2026-4356; the fix
+  floor is **1.9.1**). Pinned to 1.9.10 (latest, OSV-clean).
+
+### Deployed "Option A" refresh — PUBLISHED 2026-11-24 (multi-arch)
+
+Goal: ship the current launcher deployment on the safest images WITHOUT a risky
+app version jump. The running launchers (`~/projects/oh_docker/oh.sh` +
+`oh-claude.sh`) pin app **`slim-0c-1.10.0`** (openhands-ai 1.10.0 / SDK +
+agent-server **1.33.0**) and sandbox **`custom_base-browser-1.33.0`**. We
+re-hardened BOTH in place (refresh drifted deps) and republished under NEW DATED
+tags (keeps old digests for rollback):
+
+| Image | New tag | Manifest digest | Trivy CRIT |
+|-------|---------|-----------------|------------|
+| app | `sgireddy/openhands:custom_base-slim-0c-1.10.0-2026-11-24` | `sha256:d2095e18e4ce…` | **0** (amd64+arm64) |
+| sandbox | `sgireddy/agent-server:custom_base-browser-1.33.0-2026-11-24` | `sha256:ed95530e31e0…` | **1** = libxml2 CVE-2026-6653 (no-fix Chromium dep, accepted browser floor) |
+
+Built on the ohpush buildx builder, `--provenance=false`, registry re-scan BY
+DIGEST (both arches). Leaf-dep bumps applied to the app (all were HIGH, NOT
+Critical — the base was already Crit=0): Authlib 1.9.0→**1.9.10**, litellm
+1.84.1→**1.108.16**, GitPython 3.1.59→**3.2.1**, PyJWT 2.14.0→**2.15.1**, urllib3
+2.7.0→**2.8.0**, anyio→4.16.0, certifi→2026.11.20, lxml→6.1.3. `oh.sh` updated to
+the new digests/tag; **`oh-claude.sh` intentionally left untouched** (it runs the
+live agent session — editing it kills the conversation).
+
+Live-tested on a scratch instance (port 3099, fresh data dir, same OH_SECRET_KEY):
+app boots + alembic-migrates, a created conversation spawns the NEW sandbox image,
+reaches status WORKING with **no ConversationInfo schema-skew error** (1.33.0
+app↔1.33.0 sandbox match holds), `send-message` returns `success:true /
+sandbox_status:RUNNING`, Chromium 156.0.8078.108 present, condenser imports OK.
+Gotcha: the sandbox posts event webhooks to `host.docker.internal:<INTERNAL
+port 3000>`, so a scratch app published on a non-3000 host port collides with the
+prod :3000 container and shows harmless webhook 422s — a test-harness artifact,
+not an image defect. To fully exercise agent replies, test on host port 3000.
+
+### Two hard lessons from this upgrade
+
+1. **The app canNOT be version-upgraded by the pip overlay.** `openhands-ai` is
+   NOT pip-managed in the image — the app SOURCE is baked at `/app/openhands`
+   (mypyc-compiled) and SHADOWS any `pip install --upgrade openhands-ai`. Bumping
+   the pip package pulls a newer SDK while the baked app code stays old → import
+   mismatch (e.g. 1.10.0 app code vs SDK 1.34.0 →
+   `ImportError: LLMAgentSettings/AgentSettings`). A real app bump requires
+   rebuilding the base from the app source (`make build` → `openhands:latest`,
+   the documented `OPENHANDS_BASE_IMAGE` flow), then overlay-hardening — the
+   deferred "app base sourcing" step. The `APP_UPGRADE` build-arg (added this
+   session) only works for LEAF/plugin bumps, never the app framework itself.
+2. **`agent-client-protocol` 1.0.0 (released 2026-11-24) breaks SDK ≤1.34.0.**
+   It restructured the package and REMOVED `acp.helpers` (which SDK 1.19–1.34
+   import as `from acp.helpers import image_block, text_block`). SDK's constraint
+   `agent-client-protocol>=0.10.1` is too loose and resolves to 1.0.0. Correct
+   pin for these SDKs = latest 0.x = **`agent-client-protocol==0.12.1`** (0.x API
+   with `helpers`/`schema`/`transports`/`client.connection`). Only relevant when
+   doing a from-scratch app/SDK install; the in-place 1.10.0 refresh kept the
+   base's acp 0.10.1 and was unaffected.
+
+### Overlay fix: emSign guard made idempotent
+
+`Dockerfile.openhands`'s emSign-distrust step failed when re-run on an ALREADY
+hardened `-0c` base: it grepped only active `^mozilla/emSign` lines (0 on a
+hardened base, where they are already `!mozilla/emSign`) and aborted "filenames
+may have changed upstream". Fixed to count BOTH active and `!`-blacklisted
+entries; fails closed only when NEITHER form exists. Required for the re-harden
+pattern (overlay-on-overlay). Honors the repo's "overlays must be idempotent"
+rule.
+
+### Trivy scan evidence (arm64, 2026-11-24, DB-current)
+
+Scanned from the registry (this sandbox is unprivileged — the docker daemon
+runs but container EXEC/`unshare` is denied, so overlay `docker build` RUN
+steps can NOT run here; only registry image scans work). Final hardened
+overlay images must still be BUILT + scanned on the Mac host.
+
+- `ghcr.io/openhands/agent-server:1.64.0-python` (NEW base, UNHARDENED):
+  **5 CRITICAL** (4 fixable = chromium deb13u1→u3 pair, cleared by the
+  overlay apt upgrade; 1 no-fix = libxml2 CVE-2026-6653, the known-accepted
+  Chromium dep), 832 HIGH (486 fixable, overwhelmingly chromium — apt upgrade
+  clears, or STRIP_BROWSER_TOOLS removes the whole browser surface).
+- `sgireddy/agent-server:custom_base-slim` (PUBLISHED, OLD 1.58.1 base):
+  3 CRITICAL (libbrotli1, linux-libc-dev ×2) — all cleared by a rebuild on
+  the newer base + snapshot→live apt; its litellm is still the old 1.93.2.
+- `sgireddy/openhands:custom_base-slim` (PUBLISHED): **1 CRITICAL = Authlib
+  1.6.9** (the gap now fixed above). The many HIGH python pkgs (cryptography,
+  urllib3, mcp, pypdf, tornado, mistune, dulwich, …) are app-bundled deps;
+  per `POLICY_MAX_CRITICAL=0` (HIGH unbounded) they are accepted/tracked, not
+  gating. Rebuilding on the latest app base (v1.45.0) will refresh many.
 
 ## Latest published hardened slim set (2026-10-23, multi-arch amd64+arm64)
 

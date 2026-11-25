@@ -38,6 +38,15 @@ examples/.openhands/
 examples/data/
 examples/workspace/
 
+# --- Agent Canvas launcher runtime (examples/oh-canvas.sh) ------------------
+# canvas-data/ holds the generated backend API key (.backend_api_key) + state;
+# NEVER commit it. Covered defensively whether the script runs from the repo
+# root or examples/.
+canvas-data/
+examples/canvas-data/
+agent-canvas.log
+.backend_api_key
+
 # --- editor / OS noise ------------------------------------------------------
 .DS_Store
 .idea/

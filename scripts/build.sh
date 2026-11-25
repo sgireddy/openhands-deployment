@@ -8,10 +8,10 @@
 #                                    (`make build`) or pulled from whichever
 #                                    registry your fleet uses.
 #   - ghcr.io/openhands/agent-server:<tag>
-#                                    `docker pull ghcr.io/openhands/agent-server:1.19.0-python`
+#                                    `docker pull ghcr.io/openhands/agent-server:1.64.0-python`
 #                                    (public — no auth needed for read).
 #
-# For each component (openhands, agent-server):
+# For each component (openhands, agent-server, agent-canvas):
 #   1. Verify the upstream image is in the local cache; bail clearly if not.
 #   2. Scout-scan it as the BASELINE.
 #   3. Build the local hardening overlay → <out>:<custom_base>.
@@ -19,9 +19,10 @@
 #   5. Apply policy (POLICY_MAX_CRITICAL / POLICY_MAX_HIGH from .env).
 #
 # Run from repo root:
-#   ./scripts/build.sh                     # both components
+#   ./scripts/build.sh                     # all components
 #   ./scripts/build.sh openhands           # one component
 #   ./scripts/build.sh agent-server        # one component
+#   ./scripts/build.sh agent-canvas        # one component
 #   ./scripts/build.sh --yes               # non-interactive
 #
 # Exit codes:
@@ -40,7 +41,7 @@ COMPONENTS=()
 ASSUME_YES=0
 while (( $# )); do
     case "$1" in
-        openhands|agent-server) COMPONENTS+=("$1"); shift ;;
+        openhands|agent-server|agent-canvas) COMPONENTS+=("$1"); shift ;;
         --yes|-y)               ASSUME_YES=1; shift ;;
         -h|--help)
             awk 'NR>1 && /^#/ {sub(/^# ?/,""); print; next} {exit}' "$0"
@@ -49,7 +50,7 @@ while (( $# )); do
     esac
 done
 if (( ${#COMPONENTS[@]} == 0 )); then
-    COMPONENTS=(openhands agent-server)
+    COMPONENTS=(openhands agent-server agent-canvas)
 fi
 export ASSUME_YES
 
@@ -94,6 +95,13 @@ build_component() {
             out_tag="$AGENT_SERVER_OUT_TAG"
             dockerfile="overlays/Dockerfile.agent-server"
             pip_upgrades="$PIP_UPGRADES_AGENT_SERVER" ;;
+        agent-canvas)
+            base_image="$AGENT_CANVAS_BASE_IMAGE"
+            base_tag="$AGENT_CANVAS_BASE_TAG"
+            out_image="$AGENT_CANVAS_OUT_IMAGE"
+            out_tag="$AGENT_CANVAS_OUT_TAG"
+            dockerfile="overlays/Dockerfile.agent-canvas"
+            pip_upgrades="$PIP_UPGRADES_AGENT_CANVAS" ;;
         *) err "unknown component: $comp"; return 1 ;;
     esac
 
