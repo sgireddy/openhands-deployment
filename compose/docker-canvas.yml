@@ -34,10 +34,12 @@ services:
     ports:
       - "${CANVAS_BIND_ADDR:-127.0.0.1}:${CANVAS_HOST_PORT:-3000}:8000"
     environment:
-      # Protects the bundled backend API. REQUIRED — set a strong random value
-      # in .env (e.g. `openssl rand -hex 32`). Empty disables the guard, which
-      # we do not want even on localhost.
-      LOCAL_BACKEND_API_KEY: ${LOCAL_BACKEND_API_KEY:?set LOCAL_BACKEND_API_KEY in .env}
+      # Protects the bundled backend API for any non-localhost (LAN) session.
+      # REQUIRED in practice — set a strong random value in .env
+      # (`openssl rand -hex 32`). Left plain (not `:?`) so routine `docker
+      # compose down` still works without the value in the environment; the
+      # localhost-only port binding is the primary network control.
+      LOCAL_BACKEND_API_KEY: ${LOCAL_BACKEND_API_KEY:-}
       # Feature toggles (match the stock image defaults the agent expects).
       OH_ENABLE_BROWSER: ${OH_ENABLE_BROWSER:-true}
       OH_ENABLE_VSCODE: ${OH_ENABLE_VSCODE:-true}

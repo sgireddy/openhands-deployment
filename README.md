@@ -38,10 +38,12 @@ upstream image  ──►  overlay (apt-get upgrade, optional pip pins)  ──�
 ├── .env.example                 # template for runtime config
 ├── .gitignore                   # excludes .env, reports/, logs, .DS_Store, etc.
 ├── compose/
-│   └── docker-compose.yml       # consumes the *hardened* images, not upstream
+│   ├── docker-compose.yml       # classic stack: consumes the *hardened* images
+│   └── docker-canvas.yml        # Agent Canvas all-in-one app (separate stack)
 ├── overlays/
 │   ├── Dockerfile.openhands     # FROM ${BASE_IMAGE}; apt upgrade; optional pip
-│   └── Dockerfile.agent-server  # same shape, for sandbox runtime image
+│   ├── Dockerfile.agent-server  # same shape, for sandbox runtime image
+│   └── Dockerfile.agent-canvas  # same shape, for the all-in-one Canvas image
 ├── scripts/
 │   ├── lib.sh / lib.ps1         # shared helpers (bash / PowerShell)
 │   ├── build.sh / build.ps1     # scan → overlay → scan → policy gate
@@ -392,6 +394,48 @@ docker compose -f compose/docker-compose.yml --env-file .env up -d
 (`POLICY_MAX_CRITICAL` from `.env`, default `0`). Reports for each run land
 under `$HOME/openhands-deployment/reports/<UTC-timestamp>/` — see *Local
 on-disk layout* below.
+
+### Agent Canvas (all-in-one app)
+
+The newer **Agent Canvas** app ships as one self-contained image (frontend +
+automation + a bundled agent-server behind a single ingress on `:8000`). It is
+deployed from its own compose file, `compose/docker-canvas.yml`, which is
+independent of the classic `docker-compose.yml` above — bringing Canvas up does
+**not** touch the classic `:3000`/`:3002` stacks.
+
+```bash
+# 1. Pull (or build) the hardened Canvas image.
+docker pull sgireddy/agent-canvas:custom_base-browser-1.45.0
+#   …or build locally: ./scripts/build.sh agent-canvas
+
+# 2. Set the Canvas knobs in .env (at minimum a backend key):
+#      LOCAL_BACKEND_API_KEY=$(openssl rand -hex 32)
+#      CANVAS_HOST_PORT=3000        # target cutover port
+#      CANVAS_BIND_ADDR=127.0.0.1   # localhost-only
+
+# 3. Bring it up (ingress bound to 127.0.0.1 only):
+docker compose -f compose/docker-canvas.yml --env-file .env up -d
+# → http://127.0.0.1:${CANVAS_HOST_PORT}/canvas
+```
+
+The hardened image is **multi-arch (amd64+arm64)** and scans to **1 CRITICAL**
+— the unfixable `libxml2 CVE-2026-6653` (a Chromium dependency, DoS-only), the
+accepted floor for a browser-capable image. For a literal `Critical=0` image
+without the in-sandbox browser tool, build with
+`./scripts/build.sh agent-canvas` after setting `STRIP_BROWSER_TOOLS=1` (or
+`docker build --build-arg STRIP_BROWSER_TOOLS=1 …`).
+
+The LLM is configured **per-user through the Canvas Settings UI/API on first
+run** (persisted in the `agent-canvas-state` volume), not via environment
+variables. Point it at your existing litellm proxy
+(`http://host.docker.internal:4000`) — the compose file already wires
+`host.docker.internal`.
+
+**Cutover to `:3000`** (while keeping the classic `:3002` alive for a day):
+run Canvas on a spare `CANVAS_HOST_PORT` first and verify it; then stop the
+classic `:3000` container (`docker stop openhands`) and re-up Canvas with
+`CANVAS_HOST_PORT=3000`. Conversation history does not carry over — that is
+expected for the migration.
 
 ### Alternate: launch without compose
 
