@@ -89,14 +89,19 @@ load_env() {
     : "${OPENHANDS_BASE_TAG:=latest}"
     : "${AGENT_SERVER_BASE_IMAGE:=ghcr.io/openhands/agent-server}"
     : "${AGENT_SERVER_BASE_TAG:=1.19.0-python}"
+    : "${AGENT_CANVAS_BASE_IMAGE:=ghcr.io/openhands/agent-canvas}"
+    : "${AGENT_CANVAS_BASE_TAG:=1.45.0}"
     : "${OPENHANDS_OUT_IMAGE:=openhands}"
     : "${OPENHANDS_OUT_TAG:=custom_base}"
     : "${AGENT_SERVER_OUT_IMAGE:=agent-server}"
     : "${AGENT_SERVER_OUT_TAG:=custom_base}"
+    : "${AGENT_CANVAS_OUT_IMAGE:=agent-canvas}"
+    : "${AGENT_CANVAS_OUT_TAG:=custom_base-browser}"
     : "${POLICY_MAX_CRITICAL:=0}"
     : "${POLICY_MAX_HIGH:=}"
     : "${PIP_UPGRADES_OPENHANDS:=}"
     : "${PIP_UPGRADES_AGENT_SERVER:=}"
+    : "${PIP_UPGRADES_AGENT_CANVAS:=}"
 }
 
 # --- pre-flight -------------------------------------------------------------
