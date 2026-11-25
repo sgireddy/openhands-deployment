@@ -64,9 +64,17 @@ chromium + XFCE/GTK + libxml2; the in-sandbox browser tool then hard-fails).
 `agent-canvas:custom_base-browser-1.45.0` → Trivy CRITICAL **5 → 1** (only
 libxml2 CVE-2026-6653, unfixable/accepted). In-image: chromium
 156.0.8078.108-1~deb13u1, **0 emSign** in OS store AND certifi cacert, uv on
-UV_NATIVE_TLS, npm 12.2.1, shell-quote 1.12.0. Multi-arch (amd64+arm64)
-build+push to `docker.io/sgireddy/agent-canvas` with `--provenance=false` and a
-dated rollback tag (`custom_base-browser-1.45.0-<DATE>`).
+UV_NATIVE_TLS, npm 12.2.1, shell-quote 1.12.0.
+
+**PUBLISHED multi-arch 2026-11-25** (amd64+arm64, `--provenance=false`) to
+`docker.io/sgireddy/agent-canvas`, tags `custom_base-browser-1.45.0` and dated
+`custom_base-browser-1.45.0-2026-11-25`:
+- manifest list `sha256:9c85c1dded71a27947adb78816506e2386f742f45f8a5ba8a138fd47ad86d52e`
+- amd64 `sha256:f476a8d2e38abaebf708d657ee258dc67f236a63ac0c4897aad9c5afe164eb7c`
+- arm64 `sha256:e13bd9a9f252ca75e5669e9e0b6a68b7c6d29d63efb52156cd486b52b8518b88`
+
+Registry Trivy re-scan BY DIGEST confirmed **1 CRITICAL on BOTH arches** (the
+accepted libxml2 only).
 
 Wired as a first-class build component: `AGENT_CANVAS_{BASE,OUT}_{IMAGE,TAG}` +
 `PIP_UPGRADES_AGENT_CANVAS` in `.env.example`/`lib.sh`/`lib.ps1`;
