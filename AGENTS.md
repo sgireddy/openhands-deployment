@@ -4,15 +4,86 @@ Persistent notes for any agent working on this repo. Keep terse and current.
 
 ## Repo purpose
 
-Hardening overlay for two OpenHands images:
+Hardening overlay for three OpenHands images:
 
-- **`openhands`**     — frontend / orchestration container (Node + Python).
+- **`openhands`**     — frontend / orchestration container (Node + Python), the
+  classic 0.x/1.x app (listen server at :3000/:3002).
 - **`agent-server`**  — sandbox / runtime container (Python + browser tools).
+- **`agent-canvas`**  — the NEW all-in-one self-host app (frontend + automation
+  + a bundled agent-server behind one ingress proxy :8000). The image is literally
+  `FROM ghcr.io/openhands/agent-server`, so its overlay mirrors agent-server's.
 
 Each gets a thin overlay Dockerfile that applies apt + Python upgrades on
 top of an upstream maintainer-published base, then is scanned by Scout
-or Trivy. Output images are tagged `:custom_base` and pushed to
-`docker.io/sgireddy/{openhands,agent-server}`.
+or Trivy. Output images are tagged `:custom_base*` and pushed to
+`docker.io/sgireddy/{openhands,agent-server,agent-canvas}`.
+
+## agent-canvas hardening (2026-11-25, branch `upgrade/openhands-latest-safe-images`)
+
+Migration to the Agent Canvas stack ("Option B"). Canvas is an all-in-one image
+`ghcr.io/openhands/agent-canvas:1.45.0` (digest
+`sha256:4eb6d6fec924573783d424ee7b911b01eb1bd620cd8bb6e69fbc6b215599083a`,
+multi-arch) that bundles **agent-server/SDK 1.63.1** + **automation 1.35.0** +
+the React frontend. Its Dockerfile final stage is `FROM ${AGENT_SERVER_IMAGE}`,
+runs as USER **openhands**, uses **system Python** (`/usr/local/lib/python3.13`,
+NO `/usr/local/venv`), a single uv at `/usr/bin/uv` (0.13.7), and EXPOSE 8000
+with `ENTRYPOINT tini -- /opt/agent-canvas/entrypoint.sh`.
+
+### Stock Trivy picture = very clean (only the browser stack)
+
+`trivy image --severity CRITICAL --pkg-types os,library` on stock 1.45.0 = **5
+CRITICAL**, ALL browser-related:
+- `chromium` / `chromium-common` CVE-2026-118333 + CVE-2026-118337 (4 rows),
+  **FIXED** in `156.0.8078.108-1~deb13u1` — cleared by the overlay's apt-upgrade
+  once the frozen Debian snapshot (`20261114T000000Z`) is repointed to live
+  `security.debian.org`.
+- `libxml2` CVE-2026-6653 — **NO FIX** (a Chromium dep, DoS-only). The accepted
+  **floor** for any browser-capable image (same as agent-server's
+  `custom_base-browser`).
+
+The Python stack is ALREADY fully patched in 1.45.0 (litellm **1.108.16**,
+certifi **2026.11.20**, anyio **4.16.0**, Authlib **1.9.10**, PyJWT 2.15.1,
+pillow 13.0.0, lxml 6.1.3, pip 26.2.2) → 0 Python Criticals, so
+`PIP_UPGRADES_AGENT_CANVAS` defaults EMPTY.
+
+### Overlay `overlays/Dockerfile.agent-canvas`
+
+Mirrors the agent-server overlay (apt live-mirror upgrade, full emSign/eMudhra
+distrust of OS store + certifi family-strip, uv native-TLS + binary floor,
+bundled npm/node CVE fixes, optional STRIP_* toggles). Canvas adaptations:
+USER root to patch → **USER openhands** restored at end; inherited tini
+ENTRYPOINT preserved; no venv branch exercised.
+
+Default build is **browser-capable** (`custom_base-browser`): apt-upgrade clears
+the 4 chromium CVEs, leaving the 1 unfixable libxml2 (accepted). Set
+`--build-arg STRIP_BROWSER_TOOLS=1` for a literal **Critical=0** image (purges
+chromium + XFCE/GTK + libxml2; the in-sandbox browser tool then hard-fails).
+
+### Verified build (arm64, --load, local Trivy 2026-11-25)
+
+`agent-canvas:custom_base-browser-1.45.0` → Trivy CRITICAL **5 → 1** (only
+libxml2 CVE-2026-6653, unfixable/accepted). In-image: chromium
+156.0.8078.108-1~deb13u1, **0 emSign** in OS store AND certifi cacert, uv on
+UV_NATIVE_TLS, npm 12.2.1, shell-quote 1.12.0. Multi-arch (amd64+arm64)
+build+push to `docker.io/sgireddy/agent-canvas` with `--provenance=false` and a
+dated rollback tag (`custom_base-browser-1.45.0-<DATE>`).
+
+Wired as a first-class build component: `AGENT_CANVAS_{BASE,OUT}_{IMAGE,TAG}` +
+`PIP_UPGRADES_AGENT_CANVAS` in `.env.example`/`lib.sh`/`lib.ps1`;
+`build.sh`/`build.ps1` accept `agent-canvas` and include it in the default set.
+
+### Canvas runtime facts (for the self-host cutover)
+
+- Self-host needs ONLY the canvas image — runtime-api/MARS is Cloud-only.
+- Single ingress **:8000**; the plan is to expose it on host **:3000** while the
+  classic `:3002` (openhands-claude) stays up for a day. Bind localhost-only.
+- LLM via the existing litellm proxy (`http://host.docker.internal:4000`,
+  model `litellm_proxy/azure-gpt-5.6-terra`); Canvas's bundled litellm is OK too.
+- Persistence volumes: `/home/openhands/.openhands` (settings/secrets/convos/
+  automation DB) + `/projects` (user code). Conversation history does NOT carry
+  over from the classic stack — acceptable per the migration plan.
+- Settings API uses **PATCH** with `agent_settings_diff`; conversation create
+  needs `agent_settings` with `secrets_encrypted:true`.
 
 ## Upstream version bump (2026-11-24, branch `upgrade/openhands-latest-safe-images`)
 
